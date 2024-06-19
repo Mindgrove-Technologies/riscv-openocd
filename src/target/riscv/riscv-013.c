@@ -3358,6 +3358,8 @@ static void log_memory_access64(target_addr_t address, uint64_t value,
 	if (debug_level < LOG_LVL_DEBUG)
 		return;
 
+	// printf("---------------- Memory Access 64 to happen: size: %d\tstart address: 0x%08lx", size_bytes, address);
+
 	char fmt[80];
 	sprintf(fmt, "M[0x%" TARGET_PRIxADDR "] %ss 0x%%0%d" PRIx64,
 			address, is_read ? "read" : "write", size_bytes * 2);
@@ -4794,6 +4796,8 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 
 			riscv_batch_add_dm_write(batch, DM_SBDATA0, sbvalue[0], false,
 						RISCV_DELAY_SYSBUS_WRITE);
+
+			// printf("---------------- Memory Access to happen: size: %d\tstart address: 0x%08lx", size, address + i * size);
 
 			log_memory_access(address + i * size, sbvalue, size, false);
 

@@ -715,6 +715,10 @@
 #define MASK_DIVW 0xfe00707f
 #define MATCH_DRET 0x7b200073
 #define MASK_DRET 0xffffffff
+#define MATCH_EBREAK_CD 0x9002900290029002
+#define MASK_EBREAK_CD 0xffffffffffffffff
+#define MATCH_EBREAK_D 0x0010007300100073
+#define MASK_EBREAK_D 0xffffffffffffffff
 #define MATCH_EBREAK 0x100073
 #define MASK_EBREAK 0xffffffff
 #define MATCH_ECALL 0x73

@@ -1353,6 +1353,35 @@ int riscv_write_by_any_size(struct target *target, target_addr_t address, uint32
 	return ERROR_FAIL;
 }
 
+static void log_memory_access64(target_addr_t address, uint64_t value,
+		unsigned int size_bytes, bool is_read)
+{
+	if (debug_level < LOG_LVL_DEBUG)
+		return;
+
+	// printf("---------------- Memory Access 64 to happen: size: %d\tstart address: 0x%08lx", size_bytes, address);
+
+	char fmt[80];
+	sprintf(fmt, "M[0x%" TARGET_PRIxADDR "] %ss 0x%%0%d" PRIx64,
+			address, is_read ? "read" : "write", size_bytes * 2);
+	switch (size_bytes) {
+		case 1:
+			value &= 0xff;
+			break;
+		case 2:
+			value &= 0xffff;
+			break;
+		case 4:
+			value &= 0xffffffffUL;
+			break;
+		case 8:
+			break;
+		default:
+			assert(false);
+	}
+	LOG_DEBUG(fmt, value);
+}
+
 /**
  * Read one memory item using any memory access size that will work.
  * Read larger section of memory and pick out the required portion, if needed.
@@ -1362,14 +1391,30 @@ int riscv_read_by_any_size(struct target *target, target_addr_t address, uint32_
 	assert(size == 1 || size == 2 ||  size == 4 || size == 8);
 
 	/* Find access size that correspond to data size and the alignment. */
-	unsigned int preferred_size = size;
+	unsigned int preferred_size = 8;
+
+	LOG_TARGET_DEBUG(target, "The preferred size to read is : %d" TARGET_PRIxADDR, preferred_size);
+
 	while (address % preferred_size != 0)
 		preferred_size /= 2;
 
 	/* First try the preferred (most natural) access size. */
 	if (read_by_given_size(target, address, size, buffer, preferred_size) == ERROR_OK)
-		return ERROR_OK;
+	{
 
+		LOG_TARGET_DEBUG(target, "Accessed 8 bytes of memory from address 0x%" TARGET_PRIxADDR, address);
+		
+		// LOG_TARGET_DEBUG(target, "The Data is: 0x" TARGET_PRIxADDR);
+		// for(unsigned int i=0; i < preferred_size; i++)
+		// {
+		// 	LOG_TARGET_DEBUG(target, "%02x" TARGET_PRIxADDR, buffer[i]);
+		// }
+
+		log_memory_access64(address, buf_get_u64(buffer, 0, size * 8),
+				size, /*is_read*/ true);
+
+		return ERROR_OK;
+	}
 	/* On failure, try other access sizes.
 	   Minimize the number of accesses by trying first the largest size. */
 	for (unsigned int access_size = 8; access_size > 0; access_size /= 2) {
@@ -1389,9 +1434,18 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 {
 	LOG_TARGET_DEBUG(target, "@0x%" TARGET_PRIxADDR, breakpoint->address);
 	assert(breakpoint);
+	LOG_TARGET_DEBUG(target, "Breakpoint length is: %d" TARGET_PRIxADDR, breakpoint->length);
+	LOG_TARGET_DEBUG(target, "Breakpoint Address is: 0x%" TARGET_PRIxADDR, breakpoint->address);
+
+	int bkpt_len = breakpoint->length;
+
+	breakpoint->length = 8;
+
+	LOG_TARGET_DEBUG(target, "Breakpoint length after change is: %d" TARGET_PRIxADDR, breakpoint->length);
+
 	if (breakpoint->type == BKPT_SOFT) {
 		/** @todo check RVC for size/alignment */
-		if (!(breakpoint->length == 4 || breakpoint->length == 2)) {
+		if (!(breakpoint->length == 8 || breakpoint->length == 4 || breakpoint->length == 2)) {
 			LOG_TARGET_ERROR(target, "Invalid breakpoint length %d", breakpoint->length);
 			return ERROR_FAIL;
 		}
@@ -1410,8 +1464,23 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 			return ERROR_FAIL;
 		}
 
-		uint8_t buff[4] = { 0 };
-		buf_set_u32(buff, 0, breakpoint->length * CHAR_BIT, breakpoint->length == 4 ? ebreak() : ebreak_c());
+		uint8_t buff[8] = { 0 };
+		
+		// buf_set_u32(buff, 0, breakpoint->length * CHAR_BIT, breakpoint->length == 4 ? ebreak() : ebreak_c());
+
+		// buf_set_u64(buff, 0, breakpoint->length * CHAR_BIT, breakpoint->length == 8 ? ebreak_d() : breakpoint->length == 4 ? ebreak() : ebreak_c());
+
+		if (bkpt_len == 2)
+		{	
+			LOG_TARGET_DEBUG(target, "Added Compressed EBREAK for 64 bits at Address: 0x%" TARGET_PRIxADDR, breakpoint->address);
+			buf_set_u64(buff, 0, breakpoint->length * CHAR_BIT, ebreak_cd());
+		}
+		else
+		{
+			LOG_TARGET_DEBUG(target, "Added EBREAK for 64 bits at Address: 0x%" TARGET_PRIxADDR, breakpoint->address);
+			buf_set_u64(buff, 0, breakpoint->length * CHAR_BIT, ebreak_d());
+		}
+
 		/* Write the ebreak instruction. */
 		if (riscv_write_by_any_size(target, breakpoint->address, breakpoint->length, buff) != ERROR_OK) {
 			LOG_TARGET_ERROR(target, "Failed to write %d-byte breakpoint instruction at 0x%"
