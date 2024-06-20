@@ -257,6 +257,36 @@ static const virt2phys_info_t sv57x4 = {
 	.pa_ppn_mask = {0x1ff, 0x1ff, 0x1ff, 0x1ff, 0xff},
 };
 
+
+static void log_memory_access64(target_addr_t address, uint64_t value,
+		unsigned int size_bytes, bool is_read)
+{
+	if (debug_level < LOG_LVL_DEBUG)
+		return;
+
+	// printf("---------------- Memory Access 64 to happen: size: %d\tstart address: 0x%08lx", size_bytes, address);
+
+	char fmt[80];
+	sprintf(fmt, "M[0x%" TARGET_PRIxADDR "] %ss 0x%%0%d" PRIx64,
+			address, is_read ? "read" : "write", size_bytes * 2);
+	switch (size_bytes) {
+		case 1:
+			value &= 0xff;
+			break;
+		case 2:
+			value &= 0xffff;
+			break;
+		case 4:
+			value &= 0xffffffffUL;
+			break;
+		case 8:
+			break;
+		default:
+			assert(false);
+	}
+	LOG_DEBUG(fmt, value);
+}
+
 static enum riscv_halt_reason riscv_halt_reason(struct target *target);
 static void riscv_info_init(struct target *target, struct riscv_info *r);
 static void riscv_invalidate_register_cache(struct target *target);
@@ -1331,13 +1361,22 @@ int riscv_write_by_any_size(struct target *target, target_addr_t address, uint32
 
 	/* Find access size that correspond to data size and the alignment. */
 	unsigned int preferred_size = size;
+
+	LOG_TARGET_DEBUG(target, "The preferred size to read is : %d" TARGET_PRIxADDR, preferred_size);
+
 	while (address % preferred_size != 0)
 		preferred_size /= 2;
 
 	/* First try the preferred (most natural) access size. */
 	if (write_by_given_size(target, address, size, buffer, preferred_size) == ERROR_OK)
-		return ERROR_OK;
+	{
+		LOG_TARGET_DEBUG(target, "Accessed 8 bytes of memory from address 0x%" TARGET_PRIxADDR, address);
 
+		log_memory_access64(address, buf_get_u64(buffer, 0, size * 8),
+				size, /*is_read*/ true);
+
+		return ERROR_OK;
+	}
 	/* On failure, try other access sizes.
 	   Minimize the number of accesses by trying first the largest size. */
 	for (unsigned int access_size = 8; access_size > 0; access_size /= 2) {
@@ -1353,35 +1392,6 @@ int riscv_write_by_any_size(struct target *target, target_addr_t address, uint32
 	return ERROR_FAIL;
 }
 
-static void log_memory_access64(target_addr_t address, uint64_t value,
-		unsigned int size_bytes, bool is_read)
-{
-	if (debug_level < LOG_LVL_DEBUG)
-		return;
-
-	// printf("---------------- Memory Access 64 to happen: size: %d\tstart address: 0x%08lx", size_bytes, address);
-
-	char fmt[80];
-	sprintf(fmt, "M[0x%" TARGET_PRIxADDR "] %ss 0x%%0%d" PRIx64,
-			address, is_read ? "read" : "write", size_bytes * 2);
-	switch (size_bytes) {
-		case 1:
-			value &= 0xff;
-			break;
-		case 2:
-			value &= 0xffff;
-			break;
-		case 4:
-			value &= 0xffffffffUL;
-			break;
-		case 8:
-			break;
-		default:
-			assert(false);
-	}
-	LOG_DEBUG(fmt, value);
-}
-
 /**
  * Read one memory item using any memory access size that will work.
  * Read larger section of memory and pick out the required portion, if needed.
@@ -1391,7 +1401,7 @@ int riscv_read_by_any_size(struct target *target, target_addr_t address, uint32_
 	assert(size == 1 || size == 2 ||  size == 4 || size == 8);
 
 	/* Find access size that correspond to data size and the alignment. */
-	unsigned int preferred_size = 8;
+	unsigned int preferred_size = size;
 
 	LOG_TARGET_DEBUG(target, "The preferred size to read is : %d" TARGET_PRIxADDR, preferred_size);
 
@@ -1403,7 +1413,7 @@ int riscv_read_by_any_size(struct target *target, target_addr_t address, uint32_
 	{
 
 		LOG_TARGET_DEBUG(target, "Accessed 8 bytes of memory from address 0x%" TARGET_PRIxADDR, address);
-		
+
 		// LOG_TARGET_DEBUG(target, "The Data is: 0x" TARGET_PRIxADDR);
 		// for(unsigned int i=0; i < preferred_size; i++)
 		// {
@@ -1430,6 +1440,104 @@ int riscv_read_by_any_size(struct target *target, target_addr_t address, uint32_
 	return ERROR_FAIL;
 }
 
+/**
+ * @brief Adds a 16-bit ebreak instruction to a copy of the original instruction.
+ *
+ * This function creates a copy of the original instruction byte array, modifies
+ * the first 16 bits with an ebreak instruction (0x9002), and returns the modified copy.
+ *
+ * @param orig_instr Pointer to the original instruction byte array.
+ * @return Pointer to the modified instruction byte array with the added ebreak.
+ *         Returns NULL if memory allocation fails.
+ */
+uint8_t *add_ebreak_16(const uint8_t *orig_instr) {
+    // Create a new array to hold the modified instruction bytes
+    uint8_t *modified_instr = malloc(8 * sizeof(uint8_t));
+
+    if (modified_instr == NULL) {
+        // perror("malloc failed");
+        return NULL;
+    }
+
+    // Copy the original instr to modified_instr
+    memcpy(modified_instr, orig_instr, 8 * sizeof(uint8_t));
+
+    // Modify the first 32 bits of modified_instr with fence.i instruction
+    uint32_t e_break = 0x9002;
+    modified_instr[0] = (e_break >> 0) & 0xFF;
+    modified_instr[1] = (e_break >> 8) & 0xFF;
+
+    // printf("\nModified instr: ");
+    // for (int i = 0; i < 4; ++i) {
+    //     printf("%02X ", modified_instr[i]); // Assuming hexadecimal output
+    // }
+    // printf("\n");
+
+    // Return the modified copy
+    return modified_instr;
+}
+
+
+/**
+ * @brief Adds a 32-bit ebreak instruction to a copy of the original instruction.
+ *
+ * This function creates a copy of the original instruction byte array, modifies
+ * the first 32 bits with an ebreak instruction (0x00100073), and returns the modified copy.
+ *
+ * @param orig_instr Pointer to the original instruction byte array.
+ * @return Pointer to the modified instruction byte array with the added ebreak.
+ *         Returns NULL if memory allocation fails.
+ */
+uint8_t *add_ebreak_32(const uint8_t *orig_instr) {
+    // Create a new array to hold the modified instruction bytes
+    uint8_t *modified_instr = malloc(8 * sizeof(uint8_t));
+
+    if (modified_instr == NULL) {
+        perror("malloc failed");
+        return NULL;
+    }
+
+    // Copy the original instr to modified_instr
+    memcpy(modified_instr, orig_instr, 8 * sizeof(uint8_t));
+
+    // Modify the first 32 bits of modified_instr with fence.i instruction
+    uint32_t e_break = 0x00100073;
+    modified_instr[0] = (e_break >> 0) & 0xFF;
+    modified_instr[1] = (e_break >> 8) & 0xFF;
+    modified_instr[2] = (e_break >> 16) & 0xFF;
+    modified_instr[3] = (e_break >> 24) & 0xFF;
+
+    // printf("\nModified instr: ");
+    // for (int i = 0; i < 4; ++i) {
+    //     printf("%02X ", modified_instr[i]); // Assuming hexadecimal output
+    // }
+    // printf("\n");
+
+    // Return the modified copy
+    return modified_instr;
+}
+
+/**
+ * @brief Converts an array of 8 bytes into a 64-bit unsigned integer.
+ *
+ * This function takes an array of 8 bytes and combines them into a single 64-bit
+ * unsigned integer (`uint64_t`). It assumes little-endian byte order, where the
+ * least significant byte is stored at the lowest address.
+ *
+ * @param bytes Pointer to an array of 8 bytes.
+ * @return The converted 64-bit unsigned integer value.
+ */
+uint64_t bytes_to_uint64(const uint8_t *bytes) {
+    uint64_t value = 0;
+
+    // Copy bytes into value, assuming little-endian order
+    for (int i = 0; i < 8; ++i) {
+        value |= ((uint64_t)bytes[i] << (i * 8));
+    }
+
+    return value;
+}
+
 static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakpoint)
 {
 	LOG_TARGET_DEBUG(target, "@0x%" TARGET_PRIxADDR, breakpoint->address);
@@ -1437,11 +1545,7 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 	LOG_TARGET_DEBUG(target, "Breakpoint length is: %d" TARGET_PRIxADDR, breakpoint->length);
 	LOG_TARGET_DEBUG(target, "Breakpoint Address is: 0x%" TARGET_PRIxADDR, breakpoint->address);
 
-	int bkpt_len = breakpoint->length;
-
-	breakpoint->length = 8;
-
-	LOG_TARGET_DEBUG(target, "Breakpoint length after change is: %d" TARGET_PRIxADDR, breakpoint->length);
+	int bkpt_len = 8;
 
 	if (breakpoint->type == BKPT_SOFT) {
 		/** @todo check RVC for size/alignment */
@@ -1458,31 +1562,40 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 
 		/* Read the original instruction. */
 		if (riscv_read_by_any_size(
-				target, breakpoint->address, breakpoint->length, breakpoint->orig_instr) != ERROR_OK) {
+				target, breakpoint->address, bkpt_len, breakpoint->orig_instr) != ERROR_OK) {
 			LOG_TARGET_ERROR(target, "Failed to read original instruction at 0x%" TARGET_PRIxADDR,
 					breakpoint->address);
 			return ERROR_FAIL;
 		}
 
 		uint8_t buff[8] = { 0 };
-		
-		// buf_set_u32(buff, 0, breakpoint->length * CHAR_BIT, breakpoint->length == 4 ? ebreak() : ebreak_c());
 
-		// buf_set_u64(buff, 0, breakpoint->length * CHAR_BIT, breakpoint->length == 8 ? ebreak_d() : breakpoint->length == 4 ? ebreak() : ebreak_c());
-
-		if (bkpt_len == 2)
+		if (breakpoint->length == 2)
 		{	
+			uint8_t *modified_instr = add_ebreak_16(breakpoint->orig_instr);
+			uint64_t value = bytes_to_uint64(modified_instr);
+
+			LOG_TARGET_DEBUG(target, "OUT after adding EBREAK: 0x%16lx" TARGET_PRIxADDR, value);
+
 			LOG_TARGET_DEBUG(target, "Added Compressed EBREAK for 64 bits at Address: 0x%" TARGET_PRIxADDR, breakpoint->address);
-			buf_set_u64(buff, 0, breakpoint->length * CHAR_BIT, ebreak_cd());
+			buf_set_u64(buff, 0, bkpt_len * CHAR_BIT, value);
+
+			free(modified_instr);
 		}
 		else
 		{
+			uint8_t *modified_instr = add_ebreak_32(breakpoint->orig_instr);
+			uint64_t value = bytes_to_uint64(modified_instr);
+
+			LOG_TARGET_DEBUG(target, "OUT after adding EBREAK: 0x%16lx" TARGET_PRIxADDR, value);
 			LOG_TARGET_DEBUG(target, "Added EBREAK for 64 bits at Address: 0x%" TARGET_PRIxADDR, breakpoint->address);
-			buf_set_u64(buff, 0, breakpoint->length * CHAR_BIT, ebreak_d());
+			buf_set_u64(buff, 0, bkpt_len * CHAR_BIT, value);
+
+			free(modified_instr);
 		}
 
 		/* Write the ebreak instruction. */
-		if (riscv_write_by_any_size(target, breakpoint->address, breakpoint->length, buff) != ERROR_OK) {
+		if (riscv_write_by_any_size(target, breakpoint->address, bkpt_len, buff) != ERROR_OK) {
 			LOG_TARGET_ERROR(target, "Failed to write %d-byte breakpoint instruction at 0x%"
 					TARGET_PRIxADDR, breakpoint->length, breakpoint->address);
 			return ERROR_FAIL;
@@ -1542,10 +1655,12 @@ static int remove_trigger(struct target *target, int unique_id)
 static int riscv_remove_breakpoint(struct target *target,
 		struct breakpoint *breakpoint)
 {
+	int bkpt_len = 8;
+
 	if (breakpoint->type == BKPT_SOFT) {
-		/* Write the original instruction. */
+
 		if (riscv_write_by_any_size(
-				target, breakpoint->address, breakpoint->length, breakpoint->orig_instr) != ERROR_OK) {
+				target, breakpoint->address, bkpt_len, breakpoint->orig_instr) != ERROR_OK) {
 			LOG_TARGET_ERROR(target, "Failed to restore instruction for %d-byte breakpoint at "
 					"0x%" TARGET_PRIxADDR, breakpoint->length, breakpoint->address);
 			return ERROR_FAIL;
