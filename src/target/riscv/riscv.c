@@ -1450,9 +1450,9 @@ int riscv_read_by_any_size(struct target *target, target_addr_t address, uint32_
  * @return Pointer to the modified instruction byte array with the added ebreak.
  *         Returns NULL if memory allocation fails.
  */
-uint8_t *add_ebreak_16(const uint8_t *orig_instr) {
+uint8_t *add_ebreak_16(const uint8_t *orig_instr, target_addr_t original_addr) {
     // Create a new array to hold the modified instruction bytes
-    uint8_t *modified_instr = malloc(8 * sizeof(uint8_t));
+    uint8_t *modified_instr = (uint8_t *)malloc(8 * sizeof(uint8_t));
 
     if (modified_instr == NULL) {
         // perror("malloc failed");
@@ -1462,21 +1462,54 @@ uint8_t *add_ebreak_16(const uint8_t *orig_instr) {
     // Copy the original instr to modified_instr
     memcpy(modified_instr, orig_instr, 8 * sizeof(uint8_t));
 
-    // Modify the first 32 bits of modified_instr with fence.i instruction
-    uint32_t e_break = 0x9002;
-    modified_instr[0] = (e_break >> 0) & 0xFF;
-    modified_instr[1] = (e_break >> 8) & 0xFF;
+    // Get the last hex digit of original_addr
+    uint8_t last_digit = original_addr & 0xF;
 
-    // printf("\nModified instr: ");
-    // for (int i = 0; i < 4; ++i) {
-    //     printf("%02X ", modified_instr[i]); // Assuming hexadecimal output
-    // }
-    // printf("\n");
+    // Variable to hold the 16-bit value to be set in modified_instr
+    uint16_t e_break = 0x9002;
+
+    // Determine the position to write 0x9002 based on the last hex digit
+    switch (last_digit) {
+		case 0x0:
+			modified_instr[0] = (e_break >> 0) & 0xFF;
+    		modified_instr[1] = (e_break >> 8) & 0xFF;
+			break;
+        case 0x2:
+            modified_instr[2] = (e_break >> 0) & 0xFF;
+            modified_instr[3] = (e_break >> 8) & 0xFF;
+            break;
+        case 0x4:
+            modified_instr[4] = (e_break >> 0) & 0xFF;
+            modified_instr[5] = (e_break >> 8) & 0xFF;
+            break;
+        case 0x6:
+            modified_instr[6] = (e_break >> 0) & 0xFF;
+            modified_instr[7] = (e_break >> 8) & 0xFF;
+            break;
+		case 0x8:
+			modified_instr[0] = (e_break >> 0) & 0xFF;
+    		modified_instr[1] = (e_break >> 8) & 0xFF;
+			break;
+        case 0xA:
+            modified_instr[2] = (e_break >> 0) & 0xFF;
+            modified_instr[3] = (e_break >> 8) & 0xFF;
+            break;
+        case 0xC:
+            modified_instr[4] = (e_break >> 0) & 0xFF;
+            modified_instr[5] = (e_break >> 8) & 0xFF;
+            break;
+        case 0xE:
+            modified_instr[6] = (e_break >> 0) & 0xFF;
+            modified_instr[7] = (e_break >> 8) & 0xFF;
+            break;
+        default:
+            // No change if last_digit is not 2, 4, 6, A, C, or E
+            break;
+    }
 
     // Return the modified copy
     return modified_instr;
 }
-
 
 /**
  * @brief Adds a 32-bit ebreak instruction to a copy of the original instruction.
@@ -1488,30 +1521,82 @@ uint8_t *add_ebreak_16(const uint8_t *orig_instr) {
  * @return Pointer to the modified instruction byte array with the added ebreak.
  *         Returns NULL if memory allocation fails.
  */
-uint8_t *add_ebreak_32(const uint8_t *orig_instr) {
+uint8_t *add_ebreak_32(const uint8_t *orig_instr, target_addr_t original_addr) {
     // Create a new array to hold the modified instruction bytes
-    uint8_t *modified_instr = malloc(8 * sizeof(uint8_t));
+    uint8_t *modified_instr = (uint8_t *)malloc(8 * sizeof(uint8_t));
 
     if (modified_instr == NULL) {
-        perror("malloc failed");
+        // perror("malloc failed");
         return NULL;
     }
 
     // Copy the original instr to modified_instr
     memcpy(modified_instr, orig_instr, 8 * sizeof(uint8_t));
 
-    // Modify the first 32 bits of modified_instr with fence.i instruction
-    uint32_t e_break = 0x00100073;
-    modified_instr[0] = (e_break >> 0) & 0xFF;
-    modified_instr[1] = (e_break >> 8) & 0xFF;
-    modified_instr[2] = (e_break >> 16) & 0xFF;
-    modified_instr[3] = (e_break >> 24) & 0xFF;
+    // Get the last hex digit of original_addr
+    uint8_t last_digit = original_addr & 0xF;
 
-    // printf("\nModified instr: ");
-    // for (int i = 0; i < 4; ++i) {
-    //     printf("%02X ", modified_instr[i]); // Assuming hexadecimal output
-    // }
-    // printf("\n");
+    // Variable to hold the 32-bit value to be set in modified_instr
+    uint32_t e_break = 0x00100073;
+
+    // Determine the position to write 0x00100073 based on the last hex digit
+    switch (last_digit) {
+		case 0x0:
+			modified_instr[0] = (e_break >> 0) & 0xFF;
+    		modified_instr[1] = (e_break >> 8) & 0xFF;
+    		modified_instr[2] = (e_break >> 16) & 0xFF;
+    		modified_instr[3] = (e_break >> 24) & 0xFF;
+			break;
+        case 0x2:
+            modified_instr[2] = (e_break >> 0) & 0xFF;
+            modified_instr[3] = (e_break >> 8) & 0xFF;
+            modified_instr[4] = (e_break >> 16) & 0xFF;
+            modified_instr[5] = (e_break >> 24) & 0xFF;
+            break;
+        case 0x4:
+            modified_instr[4] = (e_break >> 0) & 0xFF;
+            modified_instr[5] = (e_break >> 8) & 0xFF;
+            modified_instr[6] = (e_break >> 16) & 0xFF;
+            modified_instr[7] = (e_break >> 24) & 0xFF;
+            break;
+        // case 0x6: // modified_instr stores 64bits only. if the case is 0x6, 
+					 // it sets the breakpoint for 32 bits from bit 48, which extends 
+					 // till the bit 80, which is wrong, and produces store access fault.
+        //     modified_instr[6] = (e_break >> 0) & 0xFF;
+        //     modified_instr[7] = (e_break >> 8) & 0xFF;
+        //     modified_instr[8] = (e_break >> 16) & 0xFF;
+        //     modified_instr[9] = (e_break >> 24) & 0xFF;
+        //     break;
+		case 0x8:
+            modified_instr[0] = (e_break >> 0) & 0xFF;
+            modified_instr[1] = (e_break >> 8) & 0xFF;
+            modified_instr[2] = (e_break >> 16) & 0xFF;
+            modified_instr[3] = (e_break >> 24) & 0xFF;
+            break;
+        case 0xA:
+            modified_instr[2] = (e_break >> 0) & 0xFF;
+            modified_instr[3] = (e_break >> 8) & 0xFF;
+            modified_instr[4] = (e_break >> 16) & 0xFF;
+            modified_instr[5] = (e_break >> 24) & 0xFF;
+            break;
+        case 0xC:
+            modified_instr[4] = (e_break >> 0) & 0xFF;
+            modified_instr[5] = (e_break >> 8) & 0xFF;
+            modified_instr[6] = (e_break >> 16) & 0xFF;
+            modified_instr[7] = (e_break >> 24) & 0xFF;
+            break;
+        // case 0xE: // modified_instr stores 64bits only. if the case is 0xE, 
+					 // it sets the breakpoint for 32 bits from bit 48, which extends 
+					 // till the bit 80, which is wrong, and produces store access fault.
+        //     modified_instr[6] = (e_break >> 0) & 0xFF;
+        //     modified_instr[7] = (e_break >> 8) & 0xFF;
+        //     modified_instr[8] = (e_break >> 16) & 0xFF;
+        //     modified_instr[9] = (e_break >> 24) & 0xFF;
+        //     break;
+        default:
+            // No change if last_digit is not 2, 4, 6, A, C, or E
+            break;
+    }
 
     // Return the modified copy
     return modified_instr;
@@ -1527,7 +1612,8 @@ uint8_t *add_ebreak_32(const uint8_t *orig_instr) {
  * @param bytes Pointer to an array of 8 bytes.
  * @return The converted 64-bit unsigned integer value.
  */
-uint64_t bytes_to_uint64(const uint8_t *bytes) {
+uint64_t bytes_to_uint64(const uint8_t *bytes)
+{
     uint64_t value = 0;
 
     // Copy bytes into value, assuming little-endian order
@@ -1547,6 +1633,13 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 
 	int bkpt_len = 8;
 
+	LOG_TARGET_DEBUG(target, "Targetted Breakpoint Address is: 0x%" TARGET_PRIxADDR, breakpoint->address);
+
+	uint64_t initial_address = breakpoint->address - (breakpoint->address % 8);
+	// breakpoint->address = initial_address + (breakpoint->address - initial_address);
+
+	LOG_TARGET_DEBUG(target, "Fixed Breakpoint Address is: 0x%" TARGET_PRIxADDR, initial_address);
+
 	if (breakpoint->type == BKPT_SOFT) {
 		/** @todo check RVC for size/alignment */
 		if (!(breakpoint->length == 8 || breakpoint->length == 4 || breakpoint->length == 2)) {
@@ -1554,15 +1647,15 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 			return ERROR_FAIL;
 		}
 
-		if (0 != (breakpoint->address % 2)) {
+		if (0 != (initial_address % 2)) {
 			LOG_TARGET_ERROR(target, "Invalid breakpoint alignment for address 0x%" TARGET_PRIxADDR,
-				breakpoint->address);
+				initial_address);
 			return ERROR_FAIL;
 		}
 
 		/* Read the original instruction. */
 		if (riscv_read_by_any_size(
-				target, breakpoint->address, bkpt_len, breakpoint->orig_instr) != ERROR_OK) {
+				target, initial_address, bkpt_len, breakpoint->orig_instr) != ERROR_OK) {
 			LOG_TARGET_ERROR(target, "Failed to read original instruction at 0x%" TARGET_PRIxADDR,
 					breakpoint->address);
 			return ERROR_FAIL;
@@ -1572,11 +1665,11 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 
 		if (breakpoint->length == 2)
 		{	
-			uint8_t *modified_instr = add_ebreak_16(breakpoint->orig_instr);
+
+			uint8_t *modified_instr = add_ebreak_16(breakpoint->orig_instr, breakpoint->address);
 			uint64_t value = bytes_to_uint64(modified_instr);
 
 			LOG_TARGET_DEBUG(target, "OUT after adding EBREAK: 0x%16lx" TARGET_PRIxADDR, value);
-
 			LOG_TARGET_DEBUG(target, "Added Compressed EBREAK for 64 bits at Address: 0x%" TARGET_PRIxADDR, breakpoint->address);
 			buf_set_u64(buff, 0, bkpt_len * CHAR_BIT, value);
 
@@ -1584,7 +1677,7 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 		}
 		else
 		{
-			uint8_t *modified_instr = add_ebreak_32(breakpoint->orig_instr);
+			uint8_t *modified_instr = add_ebreak_32(breakpoint->orig_instr, breakpoint->address);
 			uint64_t value = bytes_to_uint64(modified_instr);
 
 			LOG_TARGET_DEBUG(target, "OUT after adding EBREAK: 0x%16lx" TARGET_PRIxADDR, value);
@@ -1595,9 +1688,9 @@ static int riscv_add_breakpoint(struct target *target, struct breakpoint *breakp
 		}
 
 		/* Write the ebreak instruction. */
-		if (riscv_write_by_any_size(target, breakpoint->address, bkpt_len, buff) != ERROR_OK) {
+		if (riscv_write_by_any_size(target, initial_address, bkpt_len, buff) != ERROR_OK) {
 			LOG_TARGET_ERROR(target, "Failed to write %d-byte breakpoint instruction at 0x%"
-					TARGET_PRIxADDR, breakpoint->length, breakpoint->address);
+					TARGET_PRIxADDR, breakpoint->length, initial_address);
 			return ERROR_FAIL;
 		}
 		breakpoint->is_set = true;
@@ -1657,12 +1750,19 @@ static int riscv_remove_breakpoint(struct target *target,
 {
 	int bkpt_len = 8;
 
+	LOG_TARGET_DEBUG(target, "Targetted Breakpoint Address is: 0x%" TARGET_PRIxADDR, breakpoint->address);
+
+	uint64_t initial_address = breakpoint->address - (breakpoint->address % 8);
+	// breakpoint->address = initial_address + (breakpoint->address - initial_address);
+
+	LOG_TARGET_DEBUG(target, "Fixed Breakpoint Address is: 0x%" TARGET_PRIxADDR, initial_address);
+
 	if (breakpoint->type == BKPT_SOFT) {
 
 		if (riscv_write_by_any_size(
-				target, breakpoint->address, bkpt_len, breakpoint->orig_instr) != ERROR_OK) {
+				target, initial_address, bkpt_len, breakpoint->orig_instr) != ERROR_OK) {
 			LOG_TARGET_ERROR(target, "Failed to restore instruction for %d-byte breakpoint at "
-					"0x%" TARGET_PRIxADDR, breakpoint->length, breakpoint->address);
+					"0x%" TARGET_PRIxADDR, breakpoint->length, initial_address);
 			return ERROR_FAIL;
 		}
 
