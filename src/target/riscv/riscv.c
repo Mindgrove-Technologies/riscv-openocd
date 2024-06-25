@@ -1559,14 +1559,15 @@ uint8_t *add_ebreak_32(const uint8_t *orig_instr, target_addr_t original_addr) {
             modified_instr[6] = (e_break >> 16) & 0xFF;
             modified_instr[7] = (e_break >> 24) & 0xFF;
             break;
-        // case 0x6: // modified_instr stores 64bits only. if the case is 0x6, 
-					 // it sets the breakpoint for 32 bits from bit 48, which extends 
-					 // till the bit 80, which is wrong, and produces store access fault.
-        //     modified_instr[6] = (e_break >> 0) & 0xFF;
-        //     modified_instr[7] = (e_break >> 8) & 0xFF;
-        //     modified_instr[8] = (e_break >> 16) & 0xFF;
-        //     modified_instr[9] = (e_break >> 24) & 0xFF;
-        //     break;
+        case 0x6: // modified_instr stores 64bits only. if the case is 0x6, 
+				  // it sets the breakpoint for 32 bits from bit 48, which extends 
+				  // till the bit 80, which is wrong, and produces store access fault.
+				  // So, adding compressed ebreak.
+			e_break = 0x9002;
+            modified_instr[6] = (e_break >> 0) & 0xFF;
+            modified_instr[7] = (e_break >> 8) & 0xFF;
+			e_break = 0x00100073;
+            break;
 		case 0x8:
             modified_instr[0] = (e_break >> 0) & 0xFF;
             modified_instr[1] = (e_break >> 8) & 0xFF;
@@ -1585,14 +1586,15 @@ uint8_t *add_ebreak_32(const uint8_t *orig_instr, target_addr_t original_addr) {
             modified_instr[6] = (e_break >> 16) & 0xFF;
             modified_instr[7] = (e_break >> 24) & 0xFF;
             break;
-        // case 0xE: // modified_instr stores 64bits only. if the case is 0xE, 
+        case 0xE: // modified_instr stores 64bits only. if the case is 0xE, 
 					 // it sets the breakpoint for 32 bits from bit 48, which extends 
 					 // till the bit 80, which is wrong, and produces store access fault.
-        //     modified_instr[6] = (e_break >> 0) & 0xFF;
-        //     modified_instr[7] = (e_break >> 8) & 0xFF;
-        //     modified_instr[8] = (e_break >> 16) & 0xFF;
-        //     modified_instr[9] = (e_break >> 24) & 0xFF;
-        //     break;
+				     // So, adding compressed ebreak.
+			e_break = 0x9002;
+            modified_instr[6] = (e_break >> 0) & 0xFF;
+            modified_instr[7] = (e_break >> 8) & 0xFF;
+			e_break = 0x00100073;
+            break;
         default:
             // No change if last_digit is not 2, 4, 6, A, C, or E
             break;
