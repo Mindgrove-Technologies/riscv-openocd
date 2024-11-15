@@ -14,6 +14,9 @@
 #include <helper/list.h>
 #include <helper/types.h>
 
+#define ERROR_INVALID_NUMBER         (-1700)
+#define ERROR_NUMBER_EXCEEDS_BUFFER  (-1701)
+
 /** @file
  * Support functions to access arbitrary bits in a byte array
  */
@@ -56,6 +59,7 @@ static inline void buf_set_u16(uint8_t *_buffer,
 static inline void buf_set_u32(uint8_t *_buffer,
 	unsigned first, unsigned num, uint32_t value)
 {
+	assert(num >= 1 && num <= 32);
 	uint8_t *buffer = _buffer;
 
 	if ((num == 32) && (first == 0)) {
@@ -86,6 +90,7 @@ static inline void buf_set_u32(uint8_t *_buffer,
 static inline void buf_set_u64(uint8_t *_buffer,
 	unsigned first, unsigned num, uint64_t value)
 {
+	assert(num >= 1 && num <= 64);
 	uint8_t *buffer = _buffer;
 
 	if ((num == 32) && (first == 0)) {
@@ -124,6 +129,7 @@ static inline void buf_set_u64(uint8_t *_buffer,
 static inline uint32_t buf_get_u32(const uint8_t *_buffer,
 	unsigned first, unsigned num)
 {
+	assert(num >= 1 && num <= 32);
 	const uint8_t *buffer = _buffer;
 
 	if ((num == 32) && (first == 0)) {
@@ -153,6 +159,7 @@ static inline uint32_t buf_get_u32(const uint8_t *_buffer,
 static inline uint64_t buf_get_u64(const uint8_t *_buffer,
 	unsigned first, unsigned num)
 {
+	assert(num >= 1 && num <= 64);
 	const uint8_t *buffer = _buffer;
 
 	if ((num == 32) && (first == 0)) {
@@ -190,8 +197,8 @@ static inline uint64_t buf_get_u64(const uint8_t *_buffer,
  */
 uint32_t flip_u32(uint32_t value, unsigned width);
 
-bool buf_cmp(const void *buf1, const void *buf2, unsigned size);
-bool buf_cmp_mask(const void *buf1, const void *buf2,
+bool buf_eq(const void *buf1, const void *buf2, unsigned size);
+bool buf_eq_mask(const void *buf1, const void *buf2,
 		const void *mask, unsigned size);
 
 /**
@@ -214,8 +221,17 @@ void *buf_set_ones(void *buf, unsigned size);
 void *buf_set_buf(const void *src, unsigned src_start,
 		  void *dst, unsigned dst_start, unsigned len);
 
-int str_to_buf(const char *str, unsigned len,
-		void *bin_buf, unsigned buf_size, unsigned radix);
+/**
+ * Parse an unsigned number (provided as a zero-terminated string)
+ * into a bit buffer whose size is buf_len bits. The base of the
+ * number is detected between decimal, hexadecimal and octal.
+ * @param str Input number, zero-terminated string
+ * @param _buf Output buffer, allocated by the caller
+ * @param buf_bitsize Output buffer size in bits
+ * @returns Error on invalid or overflowing number
+ */
+int str_to_buf(const char *str, void *_buf, unsigned int buf_bitsize);
+
 char *buf_to_hex_str(const void *buf, unsigned size);
 
 /* read a uint32_t from a buffer in target memory endianness */

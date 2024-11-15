@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
-#ifndef TARGET__RISCV__PROGRAM_H
-#define TARGET__RISCV__PROGRAM_H
+#ifndef OPENOCD_TARGET_RISCV_PROGRAM_H
+#define OPENOCD_TARGET_RISCV_PROGRAM_H
 
 #include "riscv.h"
 
@@ -41,7 +41,7 @@ int riscv_program_write(struct riscv_program *program);
 
 /* Executes a program, returning 0 if the program successfully executed.  Note
  * that this may cause registers to be saved or restored, which could result to
- * calls to things like riscv_save_register which itself could require a
+ * calls to things like riscv013_reg_save which itself could require a
  * program to execute.  That's OK, just make sure this eventually terminates.
  * */
 int riscv_program_exec(struct riscv_program *p, struct target *t);
@@ -77,4 +77,4 @@ int riscv_program_ebreak(struct riscv_program *p);
 
 int riscv_program_addi(struct riscv_program *p, enum gdb_regno d, enum gdb_regno s, int16_t i);
 
-#endif
+#endif /* OPENOCD_TARGET_RISCV_PROGRAM_H */

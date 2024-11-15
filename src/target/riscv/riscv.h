@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
-#ifndef RISCV_H
-#define RISCV_H
+#ifndef OPENOCD_TARGET_RISCV_RISCV_H
+#define OPENOCD_TARGET_RISCV_RISCV_H
 
 struct riscv_program;
 
@@ -9,8 +9,9 @@ struct riscv_program;
 #include "opcodes.h"
 #include "gdb_regs.h"
 #include "jtag/jtag.h"
-#include "target/register.h"
 #include "target/semihosting_common.h"
+#include "target/target.h"
+#include "target/register.h"
 #include <helper/command.h>
 #include <helper/bits.h>
 
@@ -21,18 +22,18 @@ struct riscv_program;
 #define RISCV_MAX_HWBPS 16
 #define RISCV_MAX_DMS 100
 
-#define DEFAULT_COMMAND_TIMEOUT_SEC		2
-#define DEFAULT_RESET_TIMEOUT_SEC		30
+#define DEFAULT_COMMAND_TIMEOUT_SEC 5
 
 #define RISCV_SATP_MODE(xlen)  ((xlen) == 32 ? SATP32_MODE : SATP64_MODE)
 #define RISCV_SATP_PPN(xlen)  ((xlen) == 32 ? SATP32_PPN : SATP64_PPN)
 #define RISCV_HGATP_MODE(xlen)  ((xlen) == 32 ? HGATP32_MODE : HGATP64_MODE)
 #define RISCV_HGATP_PPN(xlen)  ((xlen) == 32 ? HGATP32_PPN : HGATP64_PPN)
 #define RISCV_PGSHIFT 12
+#define RISCV_PGSIZE BIT(RISCV_PGSHIFT)
+#define RISCV_PGBASE(addr) ((addr) & ~(RISCV_PGSIZE - 1))
+#define RISCV_PGOFFSET(addr) ((addr) & (RISCV_PGSIZE - 1))
 
 #define PG_MAX_LEVEL 5
-
-#define RISCV_NUM_MEM_ACCESS_METHODS  3
 
 #define RISCV_BATCH_ALLOC_SIZE 128
 
@@ -52,12 +53,20 @@ typedef enum {
 	YNM_NO
 } yes_no_maybe_t;
 
-enum riscv_mem_access_method {
-	RISCV_MEM_ACCESS_UNSPECIFIED,
+typedef enum riscv_mem_access_method {
 	RISCV_MEM_ACCESS_PROGBUF,
 	RISCV_MEM_ACCESS_SYSBUS,
-	RISCV_MEM_ACCESS_ABSTRACT
-};
+	RISCV_MEM_ACCESS_ABSTRACT,
+	RISCV_MEM_ACCESS_MAX_METHODS_NUM
+} riscv_mem_access_method_t;
+
+typedef enum riscv_virt2phys_mode {
+	RISCV_VIRT2PHYS_MODE_HW,
+	RISCV_VIRT2PHYS_MODE_SW,
+	RISCV_VIRT2PHYS_MODE_OFF
+} riscv_virt2phys_mode_t;
+
+const char *riscv_virt2phys_mode_to_str(riscv_virt2phys_mode_t mode);
 
 enum riscv_halt_reason {
 	RISCV_HALT_INTERRUPT,
@@ -83,9 +92,11 @@ enum riscv_hart_state {
 	RISCV_STATE_UNAVAILABLE
 };
 
+/* RISC-V-specific data assigned to a register. */
 typedef struct {
 	struct target *target;
-	unsigned custom_number;
+	/* Abstract command's regno for a custom register. */
+	unsigned int custom_number;
 } riscv_reg_info_t;
 
 #define RISCV_SAMPLE_BUF_TIMESTAMP_BEFORE	0x80
@@ -165,11 +176,8 @@ struct riscv_info {
 	 * most recent halt was not caused by a trigger, then this is -1. */
 	int64_t trigger_hit;
 
-	/* The number of entries in the program buffer. */
-	int progbuf_size;
-
-	/* This hart contains an implicit ebreak at the end of the program buffer. */
-	bool impebreak;
+	/* The configured approach to translate virtual addresses to physical */
+	riscv_virt2phys_mode_t virt2phys_mode;
 
 	bool triggers_enumerated;
 
@@ -190,14 +198,6 @@ struct riscv_info {
 
 	/* Helper functions that target the various RISC-V debug spec
 	 * implementations. */
-	int (*get_register)(struct target *target, riscv_reg_t *value,
-			enum gdb_regno regno);
-	int (*set_register)(struct target *target, enum gdb_regno regno,
-			riscv_reg_t value);
-	int (*get_register_buf)(struct target *target, uint8_t *buf,
-			enum gdb_regno regno);
-	int (*set_register_buf)(struct target *target, enum gdb_regno regno,
-			const uint8_t *buf);
 	int (*select_target)(struct target *target);
 	int (*get_hart_state)(struct target *target, enum riscv_hart_state *state);
 	/* Resume this target, as well as every other prepped target that can be
@@ -232,8 +232,8 @@ struct riscv_info {
 	int (*execute_progbuf)(struct target *target, uint32_t *cmderr);
 	int (*invalidate_cached_progbuf)(struct target *target);
 	int (*get_dmi_scan_length)(struct target *target);
-	void (*fill_dm_write)(struct target *target, char *buf, uint64_t a, uint32_t d);
-	void (*fill_dm_read)(struct target *target, char *buf, uint64_t a);
+	void (*fill_dmi_write)(struct target *target, char *buf, uint64_t a, uint32_t d);
+	void (*fill_dmi_read)(struct target *target, char *buf, uint64_t a);
 	void (*fill_dm_nop)(struct target *target, char *buf);
 
 	int (*authdata_read)(struct target *target, uint32_t *value, unsigned int index);
@@ -241,6 +241,9 @@ struct riscv_info {
 
 	int (*dmi_read)(struct target *target, uint32_t *value, uint32_t address);
 	int (*dmi_write)(struct target *target, uint32_t address, uint32_t value);
+
+	bool (*get_impebreak)(const struct target *target);
+	unsigned int (*get_progbufsize)(const struct target *target);
 
 	/* Get the DMI address of target's DM's register.
 	 * The function should return the passed address
@@ -256,7 +259,7 @@ struct riscv_info {
 	int (*read_memory)(struct target *target, target_addr_t address,
 			uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment);
 
-	unsigned (*data_bits)(struct target *target);
+	unsigned int (*data_bits)(struct target *target);
 
 	COMMAND_HELPER((*print_info), struct target *target);
 
@@ -278,18 +281,16 @@ struct riscv_info {
 	struct reg_data_type_union vector_union;
 	struct reg_data_type type_vector;
 
-	/* Set when trigger registers are changed by the user. This indicates we need
-	 * to beware that we may hit a trigger that we didn't realize had been set. */
-	bool manual_hwbp_set;
+	bool *reserved_triggers;
 
 	/* Memory access methods to use, ordered by priority, highest to lowest. */
-	int mem_access_methods[RISCV_NUM_MEM_ACCESS_METHODS];
+	riscv_mem_access_method_t mem_access_methods[RISCV_MEM_ACCESS_MAX_METHODS_NUM];
+
+	unsigned int num_enabled_mem_access_methods;
 
 	/* Different memory regions may need different methods but single configuration is applied
 	 * for all. Following flags are used to warn only once about failing memory access method. */
-	bool mem_access_progbuf_warn;
-	bool mem_access_sysbus_warn;
-	bool mem_access_abstract_warn;
+	bool mem_access_warn[RISCV_MEM_ACCESS_MAX_METHODS_NUM];
 
 	/* In addition to the ones in the standard spec, we'll also expose additional
 	 * CSRs in this list. */
@@ -333,24 +334,22 @@ typedef struct {
 typedef struct {
 	const char *name;
 	int level;
-	unsigned va_bits;
+	unsigned int va_bits;
 	/* log2(PTESIZE) */
-	unsigned pte_shift;
-	unsigned vpn_shift[PG_MAX_LEVEL];
-	unsigned vpn_mask[PG_MAX_LEVEL];
-	unsigned pte_ppn_shift[PG_MAX_LEVEL];
-	unsigned pte_ppn_mask[PG_MAX_LEVEL];
-	unsigned pa_ppn_shift[PG_MAX_LEVEL];
-	unsigned pa_ppn_mask[PG_MAX_LEVEL];
+	unsigned int pte_shift;
+	unsigned int vpn_shift[PG_MAX_LEVEL];
+	unsigned int vpn_mask[PG_MAX_LEVEL];
+	unsigned int pte_ppn_shift[PG_MAX_LEVEL];
+	unsigned int pte_ppn_mask[PG_MAX_LEVEL];
+	unsigned int pa_ppn_shift[PG_MAX_LEVEL];
+	unsigned int pa_ppn_mask[PG_MAX_LEVEL];
 } virt2phys_info_t;
 
+bool riscv_virt2phys_mode_is_hw(const struct target *target);
+bool riscv_virt2phys_mode_is_sw(const struct target *target);
+
 /* Wall-clock timeout for a command/access. Settable via RISC-V Target commands.*/
-extern int riscv_command_timeout_sec;
-
-/* Wall-clock timeout after reset. Settable via RISC-V Target commands.*/
-extern int riscv_reset_timeout_sec;
-
-extern bool riscv_enable_virtual;
+int riscv_get_command_timeout_sec(void);
 
 /* Everything needs the RISC-V specific info structure, so here's a nice macro
  * that provides that. */
@@ -371,12 +370,13 @@ extern struct scan_field select_dtmcontrol;
 extern struct scan_field select_dbus;
 extern struct scan_field select_idcode;
 
+int dtmcontrol_scan(struct target *target, uint32_t out, uint32_t *in_ptr);
+
 extern struct scan_field *bscan_tunneled_select_dmi;
 extern uint32_t bscan_tunneled_select_dmi_num_fields;
 typedef enum { BSCAN_TUNNEL_NESTED_TAP, BSCAN_TUNNEL_DATA_REGISTER } bscan_tunnel_type_t;
-extern int bscan_tunnel_ir_width;
+extern uint8_t bscan_tunnel_ir_width;
 
-int dtmcontrol_scan_via_bscan(struct target *target, uint32_t out, uint32_t *in_ptr);
 void select_dmi_via_bscan(struct target *target);
 
 /*** OpenOCD Interface */
@@ -396,32 +396,13 @@ int riscv_openocd_step(
 bool riscv_supports_extension(const struct target *target, char letter);
 
 /* Returns XLEN for the given (or current) hart. */
-unsigned riscv_xlen(const struct target *target);
+unsigned int riscv_xlen(const struct target *target);
 
 /* Returns VLENB for the given (or current) hart. */
 unsigned int riscv_vlenb(const struct target *target);
 
 /*** Support functions for the RISC-V 'RTOS', which provides multihart support
  * without requiring multiple targets.  */
-
-/**
- * Set the register value. For cacheable registers, only the cache is updated
- * (write-back mode).
- */
-int riscv_set_register(struct target *target, enum gdb_regno i, riscv_reg_t v);
-/**
- * Set the register value and immediately write it to the target
- * (write-through mode).
- */
-int riscv_write_register(struct target *target, enum gdb_regno i, riscv_reg_t v);
-/** Get register, from the cache if it's in there. */
-int riscv_get_register(struct target *target, riscv_reg_t *value,
-		enum gdb_regno r);
-/** Read the register into the cache, and mark it dirty so it will be restored
- * before resuming. */
-int riscv_save_register(struct target *target, enum gdb_regno regid);
-/** Write all dirty registers to the target. */
-int riscv_flush_registers(struct target *target);
 
 /* Checks the state of the current hart -- "is_halted" checks the actual
  * on-device register. */
@@ -436,8 +417,8 @@ int riscv_write_progbuf(struct target *target, int index, riscv_insn_t insn);
 int riscv_execute_progbuf(struct target *target, uint32_t *cmderr);
 
 void riscv_fill_dm_nop(struct target *target, char *buf);
-void riscv_fill_dm_write(struct target *target, char *buf, uint64_t a, uint32_t d);
-void riscv_fill_dm_read(struct target *target, char *buf, uint64_t a);
+void riscv_fill_dmi_write(struct target *target, char *buf, uint64_t a, uint32_t d);
+void riscv_fill_dmi_read(struct target *target, char *buf, uint64_t a);
 int riscv_get_dmi_scan_length(struct target *target);
 
 uint32_t riscv_get_dmi_address(const struct target *target, uint32_t dm_address);
@@ -447,8 +428,6 @@ int riscv_enumerate_triggers(struct target *target);
 int riscv_add_watchpoint(struct target *target, struct watchpoint *watchpoint);
 int riscv_remove_watchpoint(struct target *target,
 		struct watchpoint *watchpoint);
-
-int riscv_init_registers(struct target *target);
 
 void riscv_semihosting_init(struct target *target);
 
@@ -463,4 +442,4 @@ int riscv_write_by_any_size(struct target *target, target_addr_t address, uint32
 int riscv_interrupts_disable(struct target *target, uint64_t ie_mask, uint64_t *old_mstatus);
 int riscv_interrupts_restore(struct target *target, uint64_t old_mstatus);
 
-#endif
+#endif /* OPENOCD_TARGET_RISCV_RISCV_H */

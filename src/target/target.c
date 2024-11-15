@@ -3125,11 +3125,18 @@ COMMAND_HANDLER(handle_reg_command)
 	/* set register value */
 	if (CMD_ARGC == 2) {
 		uint8_t *buf = malloc(DIV_ROUND_UP(reg->size, 8));
-		if (!buf)
+		if (!buf) {
+			LOG_ERROR("Failed to allocate memory");
 			return ERROR_FAIL;
-		str_to_buf(CMD_ARGV[1], strlen(CMD_ARGV[1]), buf, reg->size, 0);
+		}
 
-		int retval = reg->type->set(reg, buf);
+		int retval = CALL_COMMAND_HANDLER(command_parse_str_to_buf, CMD_ARGV[1], buf, reg->size);
+		if (retval != ERROR_OK) {
+			free(buf);
+			return retval;
+		}
+
+		retval = reg->type->set(reg, buf);
 		if (retval != ERROR_OK) {
 			LOG_ERROR("Could not write to register '%s'", reg->name);
 		} else {
@@ -3898,7 +3905,7 @@ static int handle_bp_command_list(struct command_invocation *cmd)
 	while (breakpoint) {
 		if (breakpoint->type == BKPT_SOFT) {
 			char *buf = buf_to_hex_str(breakpoint->orig_instr,
-					breakpoint->length);
+					breakpoint->length * 8);
 			command_print(cmd, "Software breakpoint(IVA): addr=" TARGET_ADDR_FMT ", len=0x%x, orig_instr=0x%s",
 					breakpoint->address,
 					breakpoint->length,
@@ -3927,7 +3934,7 @@ static int handle_bp_command_list(struct command_invocation *cmd)
 }
 
 static int handle_bp_command_set(struct command_invocation *cmd,
-		target_addr_t addr, uint32_t asid, uint32_t length, int hw)
+		target_addr_t addr, uint32_t asid, unsigned int length, int hw)
 {
 	struct target *target = get_current_target(cmd->ctx);
 	int retval;
@@ -4044,7 +4051,7 @@ COMMAND_HANDLER(handle_wp_command)
 		while (watchpoint) {
 			char wp_type = (watchpoint->rw == WPT_READ ? 'r' : (watchpoint->rw == WPT_WRITE ? 'w' : 'a'));
 			command_print(CMD, "address: " TARGET_ADDR_FMT
-					", len: 0x%8.8" PRIx32
+					", len: 0x%8.8x"
 					", r/w/a: %c, value: 0x%8.8" PRIx64
 					", mask: 0x%8.8" PRIx64,
 					watchpoint->address,
@@ -4186,7 +4193,7 @@ static void write_gmon(uint32_t *samples, uint32_t sample_num, const char *filen
 			uint32_t start_address, uint32_t end_address, struct target *target, uint32_t duration_ms)
 {
 	uint32_t i;
-	FILE *f = fopen(filename, "w");
+	FILE *f = fopen(filename, "wb");
 	if (!f)
 		return;
 	write_string(f, "gmon");
@@ -4675,9 +4682,8 @@ void target_handle_event(struct target *target, enum target_event e)
 
 			if (retval != JIM_OK) {
 				Jim_MakeErrorMessage(teap->interp);
-				LOG_USER("Error executing event %s on target %s:\n%s",
+				LOG_TARGET_ERROR(target, "Execution of event %s failed:\n%s",
 						  target_event_name(e),
-						  target_name(target),
 						  Jim_GetString(Jim_GetResult(teap->interp), NULL));
 				/* clean both error code and stacktrace before return */
 				Jim_Eval(teap->interp, "error \"\" \"\"");
@@ -4773,63 +4779,63 @@ static int target_jim_get_reg(Jim_Interp *interp, int argc,
 	return JIM_OK;
 }
 
-static int target_jim_set_reg(Jim_Interp *interp, int argc,
-		Jim_Obj * const *argv)
+COMMAND_HANDLER(handle_set_reg_command)
 {
-	if (argc != 2) {
-		Jim_WrongNumArgs(interp, 1, argv, "dict");
-		return JIM_ERR;
-	}
+	if (CMD_ARGC != 1)
+		return ERROR_COMMAND_SYNTAX_ERROR;
 
 	int tmp;
 #if JIM_VERSION >= 80
-	Jim_Obj **dict = Jim_DictPairs(interp, argv[1], &tmp);
+	Jim_Obj **dict = Jim_DictPairs(CMD_CTX->interp, CMD_JIMTCL_ARGV[0], &tmp);
 
 	if (!dict)
-		return JIM_ERR;
+		return ERROR_FAIL;
 #else
 	Jim_Obj **dict;
-	int ret = Jim_DictPairs(interp, argv[1], &dict, &tmp);
+	int ret = Jim_DictPairs(CMD_CTX->interp, CMD_JIMTCL_ARGV[0], &dict, &tmp);
 
 	if (ret != JIM_OK)
-		return ret;
+		return ERROR_FAIL;
 #endif
 
 	const unsigned int length = tmp;
-	struct command_context *cmd_ctx = current_command_context(interp);
-	assert(cmd_ctx);
-	const struct target *target = get_current_target(cmd_ctx);
+
+	const struct target *target = get_current_target(CMD_CTX);
+	assert(target);
 
 	for (unsigned int i = 0; i < length; i += 2) {
 		const char *reg_name = Jim_String(dict[i]);
 		const char *reg_value = Jim_String(dict[i + 1]);
-		struct reg *reg = register_get_by_name(target->reg_cache, reg_name,
-			false);
+		struct reg *reg = register_get_by_name(target->reg_cache, reg_name, false);
 
 		if (!reg || !reg->exist) {
-			Jim_SetResultFormatted(interp, "unknown register '%s'", reg_name);
-			return JIM_ERR;
+			command_print(CMD, "unknown register '%s'", reg_name);
+			return ERROR_FAIL;
 		}
 
 		uint8_t *buf = malloc(DIV_ROUND_UP(reg->size, 8));
-
 		if (!buf) {
 			LOG_ERROR("Failed to allocate memory");
-			return JIM_ERR;
+			return ERROR_FAIL;
 		}
 
-		str_to_buf(reg_value, strlen(reg_value), buf, reg->size, 0);
-		int retval = reg->type->set(reg, buf);
+		int retval = CALL_COMMAND_HANDLER(command_parse_str_to_buf, reg_value, buf, reg->size);
+		if (retval != ERROR_OK) {
+			free(buf);
+			return retval;
+		}
+
+		retval = reg->type->set(reg, buf);
 		free(buf);
 
 		if (retval != ERROR_OK) {
-			Jim_SetResultFormatted(interp, "failed to set '%s' to register '%s'",
+			command_print(CMD, "failed to set '%s' to register '%s'",
 				reg_value, reg_name);
-			return JIM_ERR;
+			return retval;
 		}
 	}
 
-	return JIM_OK;
+	return ERROR_OK;
 }
 
 /**
@@ -5349,17 +5355,19 @@ COMMAND_HANDLER(handle_target_reset)
 		return ERROR_FAIL;
 	}
 
-	if (target->defer_examine)
-		target_reset_examined(target);
-
 	/* determine if we should halt or not. */
 	target->reset_halt = (a != 0);
 	/* When this happens - all workareas are invalid. */
 	target_free_all_working_areas_restore(target, 0);
 
 	/* do the assert */
-	if (n->value == NVP_ASSERT)
-		return target->type->assert_reset(target);
+	if (n->value == NVP_ASSERT) {
+		int retval = target->type->assert_reset(target);
+		if (target->defer_examine)
+			target_reset_examined(target);
+		return retval;
+	}
+
 	return target->type->deassert_reset(target);
 }
 
@@ -5567,7 +5575,7 @@ static const struct command_registration target_instance_command_handlers[] = {
 	{
 		.name = "set_reg",
 		.mode = COMMAND_EXEC,
-		.jim_handler = target_jim_set_reg,
+		.handler = handle_set_reg_command,
 		.help = "Set target register values",
 		.usage = "dict",
 	},
@@ -5788,7 +5796,7 @@ static int target_create(struct jim_getopt_info *goi)
 	}
 
 	target->dbgmsg          = NULL;
-	target->dbg_msg_enabled = 0;
+	target->dbg_msg_enabled = false;
 
 	target->endianness = TARGET_ENDIAN_UNKNOWN;
 
@@ -6702,7 +6710,7 @@ static const struct command_registration target_exec_command_handlers[] = {
 	{
 		.name = "set_reg",
 		.mode = COMMAND_EXEC,
-		.jim_handler = target_jim_set_reg,
+		.handler = handle_set_reg_command,
 		.help = "Set target register values",
 		.usage = "dict",
 	},

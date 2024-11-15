@@ -436,7 +436,7 @@ AS_CASE([$host],
     # In case enable_buspirate=auto, make sure it will not be built.
     enable_buspirate=no
 
-    AC_SUBST([HOST_CPPFLAGS], [-D__USE_MINGW_ANSI_STDIO])
+    AC_SUBST([HOST_CPPFLAGS], ["-D__USE_MINGW_ANSI_STDIO -DFD_SETSIZE=128"])
   ],
   [*darwin*], [
     is_darwin=yes
@@ -594,6 +594,15 @@ AS_IF([test "x$use_internal_jimtcl" = "xyes"], [
     AX_CONFIG_SUBDIR_OPTION([jimtcl], [$jimtcl_config_options])
   ], [
     AC_MSG_ERROR([jimtcl not found, run git submodule init and git submodule update.])
+  ])
+], [
+  PKG_CHECK_MODULES([JIMTCL], [jimtcl >= 0.79], [
+      have_jimtcl_pkg_config=yes
+    ], [
+      have_jimtcl_pkg_config=no
+      AC_CHECK_HEADER([jim.h], [], [
+        AC_MSG_ERROR([jimtcl is required but not found via pkg-config and system includes])
+      ])
   ])
 ])
 
@@ -782,6 +791,7 @@ AM_CONDITIONAL([DMEM], [test "x$build_dmem" = "xyes"])
 AM_CONDITIONAL([HAVE_CAPSTONE], [test "x$enable_capstone" != "xno"])
 
 AM_CONDITIONAL([INTERNAL_JIMTCL], [test "x$use_internal_jimtcl" = "xyes"])
+AM_CONDITIONAL([HAVE_JIMTCL_PKG_CONFIG], [test "x$have_jimtcl_pkg_config" = "xyes"])
 AM_CONDITIONAL([INTERNAL_LIBJAYLINK], [test "x$use_internal_libjaylink" = "xyes"])
 
 # Look for environ alternatives.  Possibility #1: is environ in unistd.h or stdlib.h?

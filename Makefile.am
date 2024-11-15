@@ -37,19 +37,19 @@ DISTCLEANFILES += jimtcl/jsmn/jsmn.o
 endif
 
 # common flags used in openocd build
-AM_CFLAGS = $(GCC_WARNINGS)\
-			  -DFD_SETSIZE=128
+AM_CFLAGS = $(GCC_WARNINGS)
 
 AM_CPPFLAGS = $(HOST_CPPFLAGS)\
 			  -I$(top_srcdir)/src \
 			  -I$(top_builddir)/src \
 			  -DPKGDATADIR=\"$(pkgdatadir)\" \
-			  -DBINDIR=\"$(bindir)\"\
-			  -DFD_SETSIZE=128
+			  -DBINDIR=\"$(bindir)\"
 
 if INTERNAL_JIMTCL
 AM_CPPFLAGS += -I$(top_srcdir)/jimtcl \
 			   -I$(top_builddir)/jimtcl
+else
+AM_CPPFLAGS += $(JIMTCL_CFLAGS)
 endif
 EXTRA_DIST += \
 	BUGS \

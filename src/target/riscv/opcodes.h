@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
+#ifndef OPENOCD_TARGET_RISCV_OPCODES_H
+#define OPENOCD_TARGET_RISCV_OPCODES_H
+
 #include "encoding.h"
 
 #define ZERO	0
@@ -191,26 +194,26 @@ static uint32_t fld(unsigned int dest, unsigned int base, uint16_t offset)
 	return imm_i(offset) | inst_rs1(base) | inst_rd(dest) | MATCH_FLD;
 }
 
-static uint32_t fmv_x_w(unsigned dest, unsigned src) __attribute__ ((unused));
-static uint32_t fmv_x_w(unsigned dest, unsigned src)
+static uint32_t fmv_x_w(unsigned int dest, unsigned int src) __attribute__ ((unused));
+static uint32_t fmv_x_w(unsigned int dest, unsigned int src)
 {
 	return inst_rs1(src) | inst_rd(dest) | MATCH_FMV_X_W;
 }
 
-static uint32_t fmv_x_d(unsigned dest, unsigned src) __attribute__ ((unused));
-static uint32_t fmv_x_d(unsigned dest, unsigned src)
+static uint32_t fmv_x_d(unsigned int dest, unsigned int src) __attribute__ ((unused));
+static uint32_t fmv_x_d(unsigned int dest, unsigned int src)
 {
 	return inst_rs1(src) | inst_rd(dest) | MATCH_FMV_X_D;
 }
 
-static uint32_t fmv_w_x(unsigned dest, unsigned src) __attribute__ ((unused));
-static uint32_t fmv_w_x(unsigned dest, unsigned src)
+static uint32_t fmv_w_x(unsigned int dest, unsigned int src) __attribute__ ((unused));
+static uint32_t fmv_w_x(unsigned int dest, unsigned int src)
 {
 	return inst_rs1(src) | inst_rd(dest) | MATCH_FMV_W_X;
 }
 
-static uint32_t fmv_d_x(unsigned dest, unsigned src) __attribute__ ((unused));
-static uint32_t fmv_d_x(unsigned dest, unsigned src)
+static uint32_t fmv_d_x(unsigned int dest, unsigned int src) __attribute__ ((unused));
+static uint32_t fmv_d_x(unsigned int dest, unsigned int src)
 {
 	return inst_rs1(src) | inst_rd(dest) | MATCH_FMV_D_X;
 }
@@ -352,3 +355,4 @@ static uint32_t vslide1down_vx(unsigned int vd, unsigned int vs2,
 	return ((vm & 1) << 25) | inst_rs2(vs2) | inst_rs1(rs1) | inst_rd(vd) | MATCH_VSLIDE1DOWN_VX;
 }
 
+#endif /* OPENOCD_TARGET_RISCV_OPCODES_H */

@@ -930,7 +930,7 @@ FLASH_BANK_COMMAND_HANDLER(kinetis_flash_bank_command)
 	k_chip = kinetis_get_chip(target);
 
 	if (!k_chip) {
-		k_chip = calloc(sizeof(struct kinetis_chip), 1);
+		k_chip = calloc(1, sizeof(struct kinetis_chip));
 		if (!k_chip) {
 			LOG_ERROR("No memory");
 			return ERROR_FAIL;
@@ -1031,13 +1031,14 @@ static int kinetis_create_missing_banks(struct kinetis_chip *k_chip)
 					 bank_idx - k_chip->num_pflash_blocks);
 		}
 
-		bank = calloc(sizeof(struct flash_bank), 1);
+		bank = calloc(1, sizeof(struct flash_bank));
 		if (!bank)
 			return ERROR_FAIL;
 
 		bank->target = k_chip->target;
 		bank->driver = &kinetis_flash;
 		bank->default_padded_value = bank->erased_value = 0xff;
+		bank->minimal_write_gap = FLASH_WRITE_GAP_SECTOR;
 
 		snprintf(name, sizeof(name), "%s.%s%s",
 			 base_name, class, num);

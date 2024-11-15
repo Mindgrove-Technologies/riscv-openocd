@@ -16,6 +16,7 @@
 #include "target/target.h"
 #include "target/algorithm.h"
 #include "target/target_type.h"
+#include <helper/align.h>
 #include <helper/log.h>
 #include "jtag/jtag.h"
 #include "target/register.h"
@@ -23,6 +24,9 @@
 #include "helper/time_support.h"
 #include "helper/list.h"
 #include "riscv.h"
+#include "riscv-013.h"
+#include "riscv_reg.h"
+#include "riscv-013_reg.h"
 #include "debug_defines.h"
 #include "rtos/rtos.h"
 #include "program.h"
@@ -37,10 +41,6 @@ static int riscv013_step_or_resume_current_hart(struct target *target,
 static int riscv013_clear_abstract_error(struct target *target);
 
 /* Implementations of the functions in struct riscv_info. */
-static int riscv013_get_register(struct target *target,
-		riscv_reg_t *value, enum gdb_regno rid);
-static int riscv013_set_register(struct target *target, enum gdb_regno regid,
-		riscv_reg_t value);
 static int dm013_select_hart(struct target *target, int hart_index);
 static int riscv013_halt_prep(struct target *target);
 static int riscv013_halt_go(struct target *target);
@@ -57,10 +57,7 @@ static int riscv013_invalidate_cached_progbuf(struct target *target);
 static int riscv013_execute_progbuf(struct target *target, uint32_t *cmderr);
 static void riscv013_fill_dmi_write(struct target *target, char *buf, uint64_t a, uint32_t d);
 static void riscv013_fill_dmi_read(struct target *target, char *buf, uint64_t a);
-static void riscv013_fill_dmi_nop(struct target *target, char *buf);
 static int riscv013_get_dmi_scan_length(struct target *target);
-static void riscv013_fill_dm_write(struct target *target, char *buf, uint64_t a, uint32_t d);
-static void riscv013_fill_dm_read(struct target *target, char *buf, uint64_t a);
 static void riscv013_fill_dm_nop(struct target *target, char *buf);
 static unsigned int register_size(struct target *target, enum gdb_regno number);
 static int register_read_direct(struct target *target, riscv_reg_t *value,
@@ -71,6 +68,8 @@ static int read_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment);
 static int write_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer);
+static bool riscv013_get_impebreak(const struct target *target);
+static unsigned int riscv013_get_progbufsize(const struct target *target);
 
 typedef enum {
 	HALT_GROUP,
@@ -116,7 +115,7 @@ typedef enum {
 
 typedef struct {
 	struct list_head list;
-	int abs_chain_position;
+	unsigned int abs_chain_position;
 	/* The base address to access this DM on DMI */
 	uint32_t base;
 	/* The number of harts connected to this DM. */
@@ -151,13 +150,15 @@ typedef struct {
 
 typedef struct {
 	/* The indexed used to address this hart in its DM. */
-	unsigned index;
+	unsigned int index;
 	/* Number of address bits in the dbus register. */
-	unsigned abits;
+	unsigned int abits;
 	/* Number of abstract command data registers. */
-	unsigned datacount;
+	unsigned int datacount;
 	/* Number of words in the Program Buffer. */
-	unsigned progbufsize;
+	unsigned int progbufsize;
+	/* Hart contains an implicit ebreak at the end of the program buffer. */
+	bool impebreak;
 
 	/* We cache the read-only bits of sbcs here. */
 	uint32_t sbcs;
@@ -170,21 +171,12 @@ typedef struct {
 	 * access. */
 	unsigned int dtmcs_idle;
 
-	/* This value is incremented every time a dbus access comes back as "busy".
-	 * It's used to determine how many run-test/idle cycles to feed the target
-	 * in between accesses. */
-	unsigned int dmi_busy_delay;
-
-	/* Number of run-test/idle cycles to add between consecutive bus master
-	 * reads/writes respectively. */
-	unsigned int bus_master_write_delay, bus_master_read_delay;
-
-	/* This value is increased every time we tried to execute two commands
-	 * consecutively, and the second one failed because the previous hadn't
-	 * completed yet.  It's used to add extra run-test/idle cycles after
-	 * starting a command, so we don't have to waste time checking for busy to
-	 * go low. */
-	unsigned int ac_busy_delay;
+	/* This structure is used to determine how many run-test/idle to use after
+	 * an access of corresponding "riscv_scan_delay_class".
+	 * Values are incremented every time an access results in a busy
+	 * response.
+	 */
+	struct riscv_scan_delays learned_delays;
 
 	bool abstract_read_csr_supported;
 	bool abstract_write_csr_supported;
@@ -233,7 +225,7 @@ static dm013_info_t *get_dm(struct target *target)
 	if (info->dm)
 		return info->dm;
 
-	int abs_chain_position = target->tap->abs_chain_position;
+	unsigned int abs_chain_position = target->tap->abs_chain_position;
 
 	dm013_info_t *entry;
 	dm013_info_t *dm = NULL;
@@ -357,82 +349,6 @@ static uint32_t set_dmcontrol_hartsel(uint32_t initial, int hart_index)
 	return initial;
 }
 
-static unsigned int decode_dmi(const struct target *target, char *text, uint32_t address, uint32_t data)
-{
-	static const struct {
-		uint32_t address;
-		enum riscv_debug_reg_ordinal ordinal;
-	} description[] = {
-		{DM_DMCONTROL, DM_DMCONTROL_ORDINAL},
-		{DM_DMSTATUS, DM_DMSTATUS_ORDINAL},
-		{DM_ABSTRACTCS, DM_ABSTRACTCS_ORDINAL},
-		{DM_COMMAND, DM_COMMAND_ORDINAL},
-		{DM_SBCS, DM_SBCS_ORDINAL}
-	};
-
-	for (unsigned i = 0; i < ARRAY_SIZE(description); i++) {
-		if (riscv_get_dmi_address(target, description[i].address) == address) {
-			const riscv_debug_reg_ctx_t context = {
-				.XLEN = { .value = 0, .is_set = false },
-				.DXLEN = { .value = 0, .is_set = false },
-				.abits = { .value = 0, .is_set = false },
-			};
-			return riscv_debug_reg_to_s(text, description[i].ordinal,
-					context, data, RISCV_DEBUG_REG_HIDE_ALL_0);
-		}
-	}
-	if (text)
-		text[0] = '\0';
-	return 0;
-}
-
-void riscv_log_dmi_scan(const struct target *target, int idle, const struct scan_field *field, bool discard_in)
-{
-	static const char * const op_string[] = {"-", "r", "w", "?"};
-	static const char * const status_string[] = {"+", "?", "F", "b"};
-
-	if (debug_level < LOG_LVL_DEBUG)
-		return;
-
-	assert(field->out_value);
-	const uint64_t out = buf_get_u64(field->out_value, 0, field->num_bits);
-	const unsigned int out_op = get_field(out, DTM_DMI_OP);
-	const uint32_t out_data = get_field(out, DTM_DMI_DATA);
-	const uint32_t out_address = out >> DTM_DMI_ADDRESS_OFFSET;
-
-	if (field->in_value) {
-		const uint64_t in = buf_get_u64(field->in_value, 0, field->num_bits);
-		const unsigned int in_op = get_field(in, DTM_DMI_OP);
-		const uint32_t in_data = get_field(in, DTM_DMI_DATA);
-		const uint32_t in_address = in >> DTM_DMI_ADDRESS_OFFSET;
-
-		LOG_DEBUG("%db %s %08" PRIx32 " @%02" PRIx32 " -> %s %08" PRIx32 " @%02" PRIx32 "; %di",
-				field->num_bits, op_string[out_op], out_data, out_address,
-				status_string[in_op], in_data, in_address, idle);
-
-		if (!discard_in && in_op == DTM_DMI_OP_SUCCESS) {
-			char in_decoded[decode_dmi(target, NULL, in_address, in_data) + 1];
-			decode_dmi(target, in_decoded, in_address, in_data);
-			/* FIXME: The current code assumes that the hardware
-			 * provides the read address in the dmi.address field
-			 * when returning the dmi.data. That is however not
-			 * required by the spec, and therefore not guaranteed.
-			 * See https://github.com/riscv-collab/riscv-openocd/issues/1043
-			 */
-			LOG_DEBUG("read: %s", in_decoded);
-		}
-	} else {
-		LOG_DEBUG("%db %s %08" PRIx32 " @%02" PRIx32 " -> ?; %di",
-				field->num_bits, op_string[out_op], out_data, out_address,
-				idle);
-	}
-	if (out_op == DTM_DMI_OP_WRITE) {
-		char out_decoded[decode_dmi(target, NULL, out_address, out_data) + 1];
-		decode_dmi(target, out_decoded, out_address, out_data);
-		LOG_DEBUG("write: %s", out_decoded);
-	}
-}
-
 /*** Utility functions. ***/
 
 static void select_dmi(struct target *target)
@@ -441,53 +357,52 @@ static void select_dmi(struct target *target)
 		select_dmi_via_bscan(target);
 		return;
 	}
-	jtag_add_ir_scan(target->tap, &select_dbus, TAP_IDLE);
-}
+	if (!target->tap->enabled)
+		LOG_TARGET_ERROR(target, "BUG: Target's TAP '%s' is disabled!",
+				jtag_tap_name(target->tap));
 
-static int dtmcontrol_scan(struct target *target, uint32_t out, uint32_t *in_ptr)
-{
-	struct scan_field field;
-	uint8_t in_value[4];
-	uint8_t out_value[4] = { 0 };
-
-	if (bscan_tunnel_ir_width != 0)
-		return dtmcontrol_scan_via_bscan(target, out, in_ptr);
-
-	buf_set_u32(out_value, 0, 32, out);
-
-	jtag_add_ir_scan(target->tap, &select_dtmcontrol, TAP_IDLE);
-
-	field.num_bits = 32;
-	field.out_value = out_value;
-	field.in_value = in_value;
-	jtag_add_dr_scan(target->tap, 1, &field, TAP_IDLE);
-
-	/* Always return to dmi. */
-	select_dmi(target);
-
-	int retval = jtag_execute_queue();
-	if (retval != ERROR_OK) {
-		LOG_ERROR("failed jtag scan: %d", retval);
-		return retval;
+	bool need_ir_scan = false;
+	/* FIXME: make "tap" a const pointer. */
+	for (struct jtag_tap *tap = jtag_tap_next_enabled(NULL);
+			tap; tap = jtag_tap_next_enabled(tap)) {
+		if (tap != target->tap) {
+			/* Different TAP than ours - check if it is in bypass */
+			if (!tap->bypass) {
+				need_ir_scan = true;
+				break;
+			}
+		} else {
+			/* Our TAP - check if the correct instruction is already loaded */
+			if (!buf_eq(target->tap->cur_instr, select_dbus.out_value, target->tap->ir_length)) {
+				need_ir_scan = true;
+				break;
+			}
+		}
 	}
 
-	uint32_t in = buf_get_u32(field.in_value, 0, 32);
-	LOG_DEBUG("DTMCS: 0x%x -> 0x%x", out, in);
-
-	if (in_ptr)
-		*in_ptr = in;
-	return ERROR_OK;
+	if (need_ir_scan)
+		jtag_add_ir_scan(target->tap, &select_dbus, TAP_IDLE);
 }
 
-static void increase_dmi_busy_delay(struct target *target)
+static int increase_dmi_busy_delay(struct target *target)
 {
-	riscv013_info_t *info = get_info(target);
-	info->dmi_busy_delay += info->dmi_busy_delay / 10 + 1;
-	LOG_TARGET_DEBUG(target, "dtmcs_idle=%d, dmi_busy_delay=%d, ac_busy_delay=%d",
-			info->dtmcs_idle, info->dmi_busy_delay,
-			info->ac_busy_delay);
+	RISCV013_INFO(info);
 
-	dtmcontrol_scan(target, DTM_DTMCS_DMIRESET, NULL /* discard result */);
+	int res = dtmcontrol_scan(target, DTM_DTMCS_DMIRESET,
+			NULL /* discard result */);
+	if (res != ERROR_OK)
+		return res;
+
+	res = riscv_scan_increase_delay(&info->learned_delays,
+			RISCV_DELAY_BASE);
+	return res;
+}
+
+static void reset_learned_delays(struct target *target)
+{
+	RISCV013_INFO(info);
+	assert(info);
+	memset(&info->learned_delays, 0, sizeof(info->learned_delays));
 }
 
 static void decrement_reset_delays_counter(struct target *target, size_t finished_scans)
@@ -504,219 +419,7 @@ static void decrement_reset_delays_counter(struct target *target, size_t finishe
 	r->reset_delays_wait = -1;
 	LOG_TARGET_DEBUG(target,
 			"resetting learned delays (reset_delays_wait counter expired)");
-	RISCV013_INFO(info);
-	info->dmi_busy_delay = 0;
-	info->ac_busy_delay = 0;
-}
-/**
- * exec: If this is set, assume the scan results in an execution, so more
- * run-test/idle cycles may be required.
- */
-static dmi_status_t dmi_scan(struct target *target, uint32_t *address_in,
-		uint32_t *data_in, dmi_op_t op, uint32_t address_out, uint32_t data_out,
-		bool exec)
-{
-	riscv013_info_t *info = get_info(target);
-	unsigned num_bits = info->abits + DTM_DMI_OP_LENGTH + DTM_DMI_DATA_LENGTH;
-	size_t num_bytes = (num_bits + 7) / 8;
-	uint8_t in[num_bytes];
-	uint8_t out[num_bytes];
-	struct scan_field field = {
-		.num_bits = num_bits,
-		.out_value = out,
-		.in_value = in
-	};
-	riscv_bscan_tunneled_scan_context_t bscan_ctxt;
-
-	decrement_reset_delays_counter(target, 1);
-
-	memset(in, 0, num_bytes);
-	memset(out, 0, num_bytes);
-
-	if (info->abits == 0) {
-		LOG_TARGET_ERROR(target, "Can't access DMI because addrbits=0.");
-		return DMI_STATUS_FAILED;
-	}
-
-	buf_set_u32(out, DTM_DMI_OP_OFFSET, DTM_DMI_OP_LENGTH, op);
-	buf_set_u32(out, DTM_DMI_DATA_OFFSET, DTM_DMI_DATA_LENGTH, data_out);
-	buf_set_u32(out, DTM_DMI_ADDRESS_OFFSET, info->abits, address_out);
-
-	/* I wanted to place this code in a different function, but the way JTAG command
-	   queueing works in the jtag handling functions, the scan fields either have to be
-	   heap allocated, global/static, or else they need to stay on the stack until
-	   the jtag_execute_queue() call.  Heap or static fields in this case doesn't seem
-	   the best fit.  Declaring stack based field values in a subsidiary function call wouldn't
-	   work. */
-	if (bscan_tunnel_ir_width != 0) {
-		riscv_add_bscan_tunneled_scan(target, &field, &bscan_ctxt);
-	} else {
-		/* Assume dbus is already selected. */
-		jtag_add_dr_scan(target->tap, 1, &field, TAP_IDLE);
-	}
-
-	int idle_count = info->dmi_busy_delay;
-	if (exec)
-		idle_count += info->ac_busy_delay;
-
-	if (idle_count)
-		jtag_add_runtest(idle_count, TAP_IDLE);
-
-	int retval = jtag_execute_queue();
-	if (retval != ERROR_OK) {
-		LOG_ERROR("dmi_scan failed jtag scan");
-		if (data_in)
-			*data_in = ~0;
-		return DMI_STATUS_FAILED;
-	}
-
-	if (bscan_tunnel_ir_width != 0) {
-		/* need to right-shift "in" by one bit, because of clock skew between BSCAN TAP and DM TAP */
-		buffer_shr(in, num_bytes, 1);
-	}
-
-	if (data_in)
-		*data_in = buf_get_u32(in, DTM_DMI_DATA_OFFSET, DTM_DMI_DATA_LENGTH);
-
-	if (address_in)
-		*address_in = buf_get_u32(in, DTM_DMI_ADDRESS_OFFSET, info->abits);
-	riscv_log_dmi_scan(target, idle_count, &field, /*discard_in*/ !data_in);
-	return buf_get_u32(in, DTM_DMI_OP_OFFSET, DTM_DMI_OP_LENGTH);
-}
-
-/**
- * @param target
- * @param data_in  The data we received from the target.
- * @param dmi_busy_encountered
- *                 If non-NULL, will be updated to reflect whether DMI busy was
- *                 encountered while executing this operation or not.
- * @param op       The operation to perform (read/write/nop).
- * @param address  The address argument to that operation.
- * @param data_out The data to send to the target.
- * @param timeout_sec
- * @param exec     When true, this scan will execute something, so extra RTI
- *                 cycles may be added.
- * @param ensure_success
- *                 Scan a nop after the requested operation, ensuring the
- *                 DMI operation succeeded.
- */
-static int dmi_op_timeout(struct target *target, uint32_t *data_in,
-		bool *dmi_busy_encountered, int op, uint32_t address,
-		uint32_t data_out, int timeout_sec, bool exec, bool ensure_success)
-{
-	select_dmi(target);
-
-	dmi_status_t status;
-
-	if (dmi_busy_encountered)
-		*dmi_busy_encountered = false;
-
-	const char *op_name;
-	switch (op) {
-		case DMI_OP_NOP:
-			op_name = "nop";
-			break;
-		case DMI_OP_READ:
-			op_name = "read";
-			break;
-		case DMI_OP_WRITE:
-			op_name = "write";
-			break;
-		default:
-			LOG_ERROR("Invalid DMI operation: %d", op);
-			return ERROR_FAIL;
-	}
-
-	keep_alive();
-
-	time_t start = time(NULL);
-	/* This first loop performs the request.  Note that if for some reason this
-	 * stays busy, it is actually due to the previous access. */
-	while (1) {
-		status = dmi_scan(target, NULL, NULL, op, address, data_out,
-				exec);
-		if (status == DMI_STATUS_BUSY) {
-			increase_dmi_busy_delay(target);
-			if (dmi_busy_encountered)
-				*dmi_busy_encountered = true;
-		} else if (status == DMI_STATUS_SUCCESS) {
-			break;
-		} else {
-			dtmcontrol_scan(target, DTM_DTMCS_DMIRESET, NULL /* discard result */);
-			break;
-		}
-		if (time(NULL) - start > timeout_sec)
-			return ERROR_TIMEOUT_REACHED;
-	}
-
-	if (status != DMI_STATUS_SUCCESS) {
-		LOG_TARGET_ERROR(target, "Failed DMI %s at 0x%x; status=%d", op_name, address, status);
-		return ERROR_FAIL;
-	}
-
-	if (ensure_success) {
-		/* This second loop ensures the request succeeded, and gets back data.
-		 * Note that NOP can result in a 'busy' result as well, but that would be
-		 * noticed on the next DMI access we do. */
-		while (1) {
-			status = dmi_scan(target, NULL, data_in, DMI_OP_NOP, address, 0,
-					false);
-			if (status == DMI_STATUS_BUSY) {
-				increase_dmi_busy_delay(target);
-				if (dmi_busy_encountered)
-					*dmi_busy_encountered = true;
-			} else if (status == DMI_STATUS_SUCCESS) {
-				break;
-			} else {
-				if (data_in) {
-					LOG_TARGET_ERROR(target,
-							"Failed DMI %s (NOP) at 0x%x; value=0x%x, status=%d",
-							op_name, address, *data_in, status);
-				} else {
-					LOG_TARGET_ERROR(target,
-							"Failed DMI %s (NOP) at 0x%x; status=%d", op_name, address,
-							status);
-				}
-				dtmcontrol_scan(target, DTM_DTMCS_DMIRESET, NULL /* discard result */);
-				return ERROR_FAIL;
-			}
-			if (time(NULL) - start > timeout_sec)
-				return ERROR_TIMEOUT_REACHED;
-		}
-	}
-
-	return ERROR_OK;
-}
-
-static int dmi_op(struct target *target, uint32_t *data_in,
-		bool *dmi_busy_encountered, int op, uint32_t address,
-		uint32_t data_out, bool exec, bool ensure_success)
-{
-	int result = dmi_op_timeout(target, data_in, dmi_busy_encountered, op,
-			address, data_out, riscv_command_timeout_sec, exec, ensure_success);
-	if (result == ERROR_TIMEOUT_REACHED) {
-		LOG_TARGET_ERROR(target, "DMI operation didn't complete in %d seconds. The target is "
-				"either really slow or broken. You could increase the "
-				"timeout with riscv set_command_timeout_sec.",
-				riscv_command_timeout_sec);
-		return ERROR_FAIL;
-	}
-	return result;
-}
-
-static int dmi_read(struct target *target, uint32_t *value, uint32_t address)
-{
-	return dmi_op(target, value, NULL, DMI_OP_READ, address, 0, false, true);
-}
-
-static int dmi_read_exec(struct target *target, uint32_t *value, uint32_t address)
-{
-	return dmi_op(target, value, NULL, DMI_OP_READ, address, 0, true, true);
-}
-
-static int dmi_write(struct target *target, uint32_t address, uint32_t value)
-{
-	return dmi_op(target, NULL, NULL, DMI_OP_WRITE, address, value, false, true);
+	reset_learned_delays(target);
 }
 
 static uint32_t riscv013_get_dmi_address(const struct target *target, uint32_t address)
@@ -729,34 +432,22 @@ static uint32_t riscv013_get_dmi_address(const struct target *target, uint32_t a
 	return address + base;
 }
 
-static int dm_op_timeout(struct target *target, uint32_t *data_in,
-		bool *dmi_busy_encountered, int op, uint32_t address,
-		uint32_t data_out, int timeout_sec, bool exec, bool ensure_success)
-{
-	dm013_info_t *dm = get_dm(target);
-	if (!dm)
-		return ERROR_FAIL;
-	return dmi_op_timeout(target, data_in, dmi_busy_encountered, op, address + dm->base,
-		data_out, timeout_sec, exec, ensure_success);
-}
+static int batch_run_timeout(struct target *target, struct riscv_batch *batch);
 
-static int dm_op(struct target *target, uint32_t *data_in,
-		bool *dmi_busy_encountered, int op, uint32_t address,
-		uint32_t data_out, bool exec, bool ensure_success)
+static int dmi_read(struct target *target, uint32_t *value, uint32_t address)
 {
-	dm013_info_t *dm = get_dm(target);
-	if (!dm)
-		return ERROR_FAIL;
-	return dmi_op(target, data_in, dmi_busy_encountered, op, address + dm->base,
-			data_out, exec, ensure_success);
+	struct riscv_batch *batch = riscv_batch_alloc(target, 1);
+	riscv_batch_add_dmi_read(batch, address, RISCV_DELAY_BASE);
+	int res = batch_run_timeout(target, batch);
+	if (res == ERROR_OK && value)
+		*value = riscv_batch_get_dmi_read_data(batch, 0);
+	riscv_batch_free(batch);
+	return res;
 }
 
 static int dm_read(struct target *target, uint32_t *value, uint32_t address)
 {
-	dm013_info_t *dm = get_dm(target);
-	if (!dm)
-		return ERROR_FAIL;
-	return dmi_read(target, value, address + dm->base);
+	return dmi_read(target, value, riscv013_get_dmi_address(target, address));
 }
 
 static int dm_read_exec(struct target *target, uint32_t *value, uint32_t address)
@@ -764,16 +455,29 @@ static int dm_read_exec(struct target *target, uint32_t *value, uint32_t address
 	dm013_info_t *dm = get_dm(target);
 	if (!dm)
 		return ERROR_FAIL;
+	struct riscv_batch *batch = riscv_batch_alloc(target, 1);
+	riscv_batch_add_dm_read(batch, address, RISCV_DELAY_ABSTRACT_COMMAND);
 	dm->abstract_cmd_maybe_busy = true;
-	return dmi_read_exec(target, value, address + dm->base);
+	int res = batch_run_timeout(target, batch);
+	if (res == ERROR_OK && value)
+		*value = riscv_batch_get_dmi_read_data(batch, 0);
+	riscv_batch_free(batch);
+	return res;
+}
+
+static int dmi_write(struct target *target, uint32_t address, uint32_t value)
+{
+	struct riscv_batch *batch = riscv_batch_alloc(target, 1);
+	riscv_batch_add_dmi_write(batch, address, value, /*read_back*/ true,
+			RISCV_DELAY_BASE);
+	int res = batch_run_timeout(target, batch);
+	riscv_batch_free(batch);
+	return res;
 }
 
 static int dm_write(struct target *target, uint32_t address, uint32_t value)
 {
-	dm013_info_t *dm = get_dm(target);
-	if (!dm)
-		return ERROR_FAIL;
-	return dmi_write(target, address + dm->base, value);
+	return dmi_write(target, riscv013_get_dmi_address(target, address), value);
 }
 
 static bool check_dbgbase_exists(struct target *target)
@@ -803,11 +507,10 @@ static bool check_dbgbase_exists(struct target *target)
 	return false;
 }
 
-static int dmstatus_read_timeout(struct target *target, uint32_t *dmstatus,
-		bool authenticated, unsigned timeout_sec)
+static int dmstatus_read(struct target *target, uint32_t *dmstatus,
+		bool authenticated)
 {
-	int result = dm_op_timeout(target, dmstatus, NULL, DMI_OP_READ,
-			DM_DMSTATUS, 0, timeout_sec, false, true);
+	int result = dm_read(target, dmstatus, DM_DMSTATUS);
 	if (result != ERROR_OK)
 		return result;
 	int dmstatus_version = get_field(*dmstatus, DM_DMSTATUS_VERSION);
@@ -825,29 +528,14 @@ static int dmstatus_read_timeout(struct target *target, uint32_t *dmstatus,
 	return ERROR_OK;
 }
 
-static int dmstatus_read(struct target *target, uint32_t *dmstatus,
-		bool authenticated)
-{
-	int result = dmstatus_read_timeout(target, dmstatus, authenticated,
-			riscv_command_timeout_sec);
-	if (result == ERROR_TIMEOUT_REACHED)
-		LOG_TARGET_ERROR(target, "DMSTATUS read didn't complete in %d seconds. The target is "
-					 "either really slow or broken. You could increase the "
-					 "timeout with `riscv set_command_timeout_sec`.",
-				 riscv_command_timeout_sec);
-	return result;
-}
-
-static void increase_ac_busy_delay(struct target *target)
+static int increase_ac_busy_delay(struct target *target)
 {
 	riscv013_info_t *info = get_info(target);
-	info->ac_busy_delay += info->ac_busy_delay / 10 + 1;
-	LOG_TARGET_DEBUG(target, "dtmcs_idle=%d, dmi_busy_delay=%d, ac_busy_delay=%d",
-			info->dtmcs_idle, info->dmi_busy_delay,
-			info->ac_busy_delay);
+	return riscv_scan_increase_delay(&info->learned_delays,
+			RISCV_DELAY_ABSTRACT_COMMAND);
 }
 
-static uint32_t __attribute__((unused)) abstract_register_size(unsigned width)
+static uint32_t __attribute__((unused)) abstract_register_size(unsigned int width)
 {
 	switch (width) {
 		case 32:
@@ -890,12 +578,12 @@ static int wait_for_idle(struct target *target, uint32_t *abstractcs)
 			dm->abstract_cmd_maybe_busy = false;
 			return ERROR_OK;
 		}
-	} while ((time(NULL) - start) < riscv_command_timeout_sec);
+	} while ((time(NULL) - start) < riscv_get_command_timeout_sec());
 
 	LOG_TARGET_ERROR(target,
 		"Timed out after %ds waiting for busy to go low (abstractcs=0x%" PRIx32 "). "
 		"Increase the timeout with riscv set_command_timeout_sec.",
-		riscv_command_timeout_sec,
+		riscv_get_command_timeout_sec(),
 		*abstractcs);
 
 	if (!dm->abstract_cmd_maybe_busy)
@@ -912,13 +600,13 @@ static int dm013_select_target(struct target *target)
 	return dm013_select_hart(target, info->index);
 }
 
-#define EXECUTE_ABSTRACT_COMMAND_BATCH_SIZE 2
+#define ABSTRACT_COMMAND_BATCH_SIZE 2
 
 static size_t abstract_cmd_fill_batch(struct riscv_batch *batch,
 		uint32_t command)
 {
 	assert(riscv_batch_available_scans(batch)
-			>= EXECUTE_ABSTRACT_COMMAND_BATCH_SIZE);
+			>= ABSTRACT_COMMAND_BATCH_SIZE);
 	riscv_batch_add_dm_write(batch, DM_COMMAND, command, /* read_back */ true,
 			RISCV_DELAY_ABSTRACT_COMMAND);
 	return riscv_batch_add_dm_read(batch, DM_ABSTRACTCS, RISCV_DELAY_BASE);
@@ -936,7 +624,9 @@ static int abstract_cmd_batch_check_and_clear_cmderr(struct target *target,
 		res = wait_for_idle(target, &abstractcs);
 		if (res != ERROR_OK)
 			goto clear_cmderr;
-		increase_ac_busy_delay(target);
+		res = increase_ac_busy_delay(target);
+		if (res != ERROR_OK)
+			goto clear_cmderr;
 	}
 	*cmderr = get_field32(abstractcs, DM_ABSTRACTCS_CMDERR);
 	if (*cmderr == CMDERR_NONE)
@@ -953,9 +643,7 @@ clear_cmderr:
 	return res;
 }
 
-static int batch_run_timeout(struct target *target, struct riscv_batch *batch);
-
-static int execute_abstract_command(struct target *target, uint32_t command,
+int riscv013_execute_abstract_command(struct target *target, uint32_t command,
 		uint32_t *cmderr)
 {
 	assert(cmderr);
@@ -976,7 +664,7 @@ static int execute_abstract_command(struct target *target, uint32_t command,
 		return ERROR_FAIL;
 
 	struct riscv_batch *batch = riscv_batch_alloc(target,
-			EXECUTE_ABSTRACT_COMMAND_BATCH_SIZE);
+			ABSTRACT_COMMAND_BATCH_SIZE);
 	const size_t abstractcs_read_key = abstract_cmd_fill_batch(batch, command);
 
 	/* Abstract commands are executed while running the batch. */
@@ -1071,10 +759,10 @@ static void abstract_data_write_fill_batch(struct riscv_batch *batch,
 }
 
 /* TODO: reuse "abstract_data_write_fill_batch()" here*/
-static int write_abstract_arg(struct target *target, unsigned index,
-		riscv_reg_t value, unsigned size_bits)
+static int write_abstract_arg(struct target *target, unsigned int index,
+		riscv_reg_t value, unsigned int size_bits)
 {
-	unsigned offset = index * size_bits / 32;
+	unsigned int offset = index * size_bits / 32;
 	switch (size_bits) {
 		default:
 			LOG_TARGET_ERROR(target, "Unsupported size: %d bits", size_bits);
@@ -1091,8 +779,8 @@ static int write_abstract_arg(struct target *target, unsigned index,
 /**
  * @par size in bits
  */
-static uint32_t access_register_command(struct target *target, uint32_t number,
-		unsigned size, uint32_t flags)
+uint32_t riscv013_access_register_command(struct target *target, uint32_t number,
+		unsigned int size, uint32_t flags)
 {
 	uint32_t command = set_field(0, DM_COMMAND_CMDTYPE, 0);
 	switch (size) {
@@ -1104,7 +792,7 @@ static uint32_t access_register_command(struct target *target, uint32_t number,
 			break;
 		default:
 			LOG_TARGET_ERROR(target, "%d-bit register %s not supported.",
-					size, gdb_regno_name(target, number));
+					size, riscv_reg_gdb_regno_name(target, number));
 			assert(0);
 	}
 
@@ -1148,11 +836,11 @@ static int register_read_abstract_with_size(struct target *target,
 	if (number >= GDB_REGNO_V0 && number <= GDB_REGNO_V31)
 		return ERROR_FAIL;
 
-	uint32_t command = access_register_command(target, number, size,
+	uint32_t command = riscv013_access_register_command(target, number, size,
 			AC_ACCESS_REGISTER_TRANSFER);
 
 	uint32_t cmderr;
-	int result = execute_abstract_command(target, command, &cmderr);
+	int result = riscv013_execute_abstract_command(target, command, &cmderr);
 	if (result != ERROR_OK) {
 		if (cmderr == CMDERR_NOT_SUPPORTED) {
 			if (number >= GDB_REGNO_FPR0 && number <= GDB_REGNO_FPR31) {
@@ -1197,14 +885,14 @@ static int register_write_abstract(struct target *target, enum gdb_regno number,
 		return ERROR_FAIL;
 
 	const unsigned int size_bits = register_size(target, number);
-	const uint32_t command = access_register_command(target, number, size_bits,
+	const uint32_t command = riscv013_access_register_command(target, number, size_bits,
 			AC_ACCESS_REGISTER_TRANSFER |
 			AC_ACCESS_REGISTER_WRITE);
 	LOG_DEBUG_REG(target, AC_ACCESS_REGISTER, command);
 	assert(size_bits % 32 == 0);
 	const unsigned int size_in_words = size_bits / 32;
 	const unsigned int batch_size = size_in_words
-		+ EXECUTE_ABSTRACT_COMMAND_BATCH_SIZE;
+		+ ABSTRACT_COMMAND_BATCH_SIZE;
 	struct riscv_batch * const batch = riscv_batch_alloc(target, batch_size);
 
 	abstract_data_write_fill_batch(batch, value, /*index*/ 0, size_bits);
@@ -1240,7 +928,7 @@ cleanup:
  * Sets the AAMSIZE field of a memory access abstract command based on
  * the width (bits).
  */
-static uint32_t abstract_memory_size(unsigned width)
+static uint32_t abstract_memory_size(unsigned int width)
 {
 	switch (width) {
 		case 8:
@@ -1290,7 +978,7 @@ static int examine_progbuf(struct target *target)
 		return ERROR_OK;
 	}
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -1365,12 +1053,12 @@ static int prep_for_register_access(struct target *target,
 	}
 
 	LOG_TARGET_DEBUG(target, "Preparing mstatus to access %s",
-			gdb_regno_name(target, regno));
+			riscv_reg_gdb_regno_name(target, regno));
 
 	assert(target->state == TARGET_HALTED &&
 			"The target must be halted to modify and then restore mstatus");
 
-	if (riscv_get_register(target, orig_mstatus, GDB_REGNO_MSTATUS) != ERROR_OK)
+	if (riscv_reg_get(target, orig_mstatus, GDB_REGNO_MSTATUS) != ERROR_OK)
 		return ERROR_FAIL;
 
 	riscv_reg_t new_mstatus = *orig_mstatus;
@@ -1381,11 +1069,11 @@ static int prep_for_register_access(struct target *target,
 
 	new_mstatus = set_field(new_mstatus, field_mask, 1);
 
-	if (riscv_write_register(target, GDB_REGNO_MSTATUS, new_mstatus) != ERROR_OK)
+	if (riscv_reg_write(target, GDB_REGNO_MSTATUS, new_mstatus) != ERROR_OK)
 		return ERROR_FAIL;
 
 	LOG_TARGET_DEBUG(target, "Prepared to access %s (mstatus=0x%" PRIx64 ")",
-			gdb_regno_name(target, regno), new_mstatus);
+			riscv_reg_gdb_regno_name(target, regno), new_mstatus);
 	return ERROR_OK;
 }
 
@@ -1397,7 +1085,7 @@ static int cleanup_after_register_access(struct target *target,
 		return ERROR_OK;
 
 	LOG_TARGET_DEBUG(target, "Restoring mstatus to 0x%" PRIx64, mstatus);
-	return riscv_write_register(target, GDB_REGNO_MSTATUS, mstatus);
+	return riscv_reg_write(target, GDB_REGNO_MSTATUS, mstatus);
 }
 
 typedef enum {
@@ -1422,7 +1110,7 @@ typedef struct {
 static int scratch_reserve(struct target *target,
 		scratch_mem_t *scratch,
 		struct riscv_program *program,
-		unsigned size_bytes)
+		unsigned int size_bytes)
 {
 	riscv_addr_t alignment = 1;
 	while (alignment < size_bytes)
@@ -1454,7 +1142,7 @@ static int scratch_reserve(struct target *target,
 		return ERROR_FAIL;
 
 	/* Allow for ebreak at the end of the program. */
-	unsigned program_size = (program->instruction_count + 1) * 4;
+	unsigned int program_size = (program->instruction_count + 1) * 4;
 	scratch->hart_address = (info->progbuf_address + program_size + alignment - 1) &
 		~(alignment - 1);
 	if ((info->progbuf_writable == YNM_YES) &&
@@ -1570,12 +1258,10 @@ static unsigned int register_size(struct target *target, enum gdb_regno number)
 		return riscv_xlen(target);
 }
 
-static bool has_sufficient_progbuf(struct target *target, unsigned size)
+static bool has_sufficient_progbuf(struct target *target, unsigned int size)
 {
 	RISCV013_INFO(info);
-	RISCV_INFO(r);
-
-	return info->progbufsize + r->impebreak >= size;
+	return info->progbufsize + info->impebreak >= size;
 }
 
 /**
@@ -1616,7 +1302,7 @@ static int fpr_read_progbuf(struct target *target, uint64_t *value,
 
 	const unsigned int freg = number - GDB_REGNO_FPR0;
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -1646,7 +1332,7 @@ static int csr_read_progbuf(struct target *target, uint64_t *value,
 	assert(target->state == TARGET_HALTED);
 	assert(number >= GDB_REGNO_CSR0 && number <= GDB_REGNO_CSR4095);
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -1674,7 +1360,7 @@ static int register_read_progbuf(struct target *target, uint64_t *value,
 		return csr_read_progbuf(target, value, number);
 
 	LOG_TARGET_ERROR(target, "Unexpected read of %s via program buffer.",
-			gdb_regno_name(target, number));
+			riscv_reg_gdb_regno_name(target, number));
 	return ERROR_FAIL;
 }
 
@@ -1714,7 +1400,7 @@ static int fpr_write_progbuf(struct target *target, enum gdb_regno number,
 	assert(number >= GDB_REGNO_FPR0 && number <= GDB_REGNO_FPR31);
 	const unsigned int freg = number - GDB_REGNO_FPR0;
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -1744,11 +1430,11 @@ static int vtype_write_progbuf(struct target *target, riscv_reg_t value)
 {
 	assert(target->state == TARGET_HALTED);
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 	if (register_write_abstract(target, GDB_REGNO_S0, value) != ERROR_OK)
 		return ERROR_FAIL;
-	if (riscv_save_register(target, GDB_REGNO_S1) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S1) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -1765,11 +1451,11 @@ static int vl_write_progbuf(struct target *target, riscv_reg_t value)
 {
 	assert(target->state == TARGET_HALTED);
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 	if (register_write_abstract(target, GDB_REGNO_S0, value) != ERROR_OK)
 		return ERROR_FAIL;
-	if (riscv_save_register(target, GDB_REGNO_S1) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S1) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -1788,7 +1474,7 @@ static int csr_write_progbuf(struct target *target, enum gdb_regno number,
 	assert(target->state == TARGET_HALTED);
 	assert(number >= GDB_REGNO_CSR0 && number <= GDB_REGNO_CSR4095);
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 	if (register_write_abstract(target, GDB_REGNO_S0, value) != ERROR_OK)
 		return ERROR_FAIL;
@@ -1820,7 +1506,7 @@ static int register_write_progbuf(struct target *target, enum gdb_regno number,
 		return csr_write_progbuf(target, number, value);
 
 	LOG_TARGET_ERROR(target, "Unexpected write to %s via program buffer.",
-			gdb_regno_name(target, number));
+			riscv_reg_gdb_regno_name(target, number));
 	return ERROR_FAIL;
 }
 
@@ -1832,7 +1518,7 @@ static int register_write_direct(struct target *target, enum gdb_regno number,
 		riscv_reg_t value)
 {
 	LOG_TARGET_DEBUG(target, "Writing 0x%" PRIx64 " to %s", value,
-			gdb_regno_name(target, number));
+			riscv_reg_gdb_regno_name(target, number));
 
 	if (target->state != TARGET_HALTED)
 		return register_write_abstract(target, number, value);
@@ -1850,7 +1536,7 @@ static int register_write_direct(struct target *target, enum gdb_regno number,
 		return ERROR_FAIL;
 
 	if (result == ERROR_OK)
-		LOG_TARGET_DEBUG(target, "%s <- 0x%" PRIx64, gdb_regno_name(target, number),
+		LOG_TARGET_DEBUG(target, "%s <- 0x%" PRIx64, riscv_reg_gdb_regno_name(target, number),
 				value);
 
 	return result;
@@ -1860,7 +1546,7 @@ static int register_write_direct(struct target *target, enum gdb_regno number,
 static int register_read_direct(struct target *target, riscv_reg_t *value,
 		enum gdb_regno number)
 {
-	LOG_TARGET_DEBUG(target, "Reading %s", gdb_regno_name(target, number));
+	LOG_TARGET_DEBUG(target, "Reading %s", riscv_reg_gdb_regno_name(target, number));
 
 	if (target->state != TARGET_HALTED)
 		return register_read_abstract(target, value, number);
@@ -1879,7 +1565,7 @@ static int register_read_direct(struct target *target, riscv_reg_t *value,
 		return ERROR_FAIL;
 
 	if (result == ERROR_OK)
-		LOG_TARGET_DEBUG(target, "%s = 0x%" PRIx64, gdb_regno_name(target, number),
+		LOG_TARGET_DEBUG(target, "%s = 0x%" PRIx64, riscv_reg_gdb_regno_name(target, number),
 				*value);
 
 	return result;
@@ -1896,10 +1582,10 @@ static int wait_for_authbusy(struct target *target, uint32_t *dmstatus)
 			*dmstatus = value;
 		if (!get_field(value, DM_DMSTATUS_AUTHBUSY))
 			break;
-		if (time(NULL) - start > riscv_command_timeout_sec) {
+		if (time(NULL) - start > riscv_get_command_timeout_sec()) {
 			LOG_TARGET_ERROR(target, "Timed out after %ds waiting for authbusy to go low (dmstatus=0x%x). "
 					"Increase the timeout with riscv set_command_timeout_sec.",
-					riscv_command_timeout_sec,
+					riscv_get_command_timeout_sec(),
 					value);
 			return ERROR_FAIL;
 		}
@@ -1919,7 +1605,7 @@ static int set_dcsr_ebreak(struct target *target, bool step)
 	RISCV013_INFO(info);
 	riscv_reg_t original_dcsr, dcsr;
 	/* We want to twiddle some bits in the debug CSR so debugging works. */
-	if (riscv_get_register(target, &dcsr, GDB_REGNO_DCSR) != ERROR_OK)
+	if (riscv_reg_get(target, &dcsr, GDB_REGNO_DCSR) != ERROR_OK)
 		return ERROR_FAIL;
 	original_dcsr = dcsr;
 	dcsr = set_field(dcsr, CSR_DCSR_STEP, step);
@@ -1929,7 +1615,7 @@ static int set_dcsr_ebreak(struct target *target, bool step)
 	dcsr = set_field(dcsr, CSR_DCSR_EBREAKVS, r->riscv_ebreaku && riscv_supports_extension(target, 'H'));
 	dcsr = set_field(dcsr, CSR_DCSR_EBREAKVU, r->riscv_ebreaku && riscv_supports_extension(target, 'H'));
 	if (dcsr != original_dcsr &&
-			riscv_set_register(target, GDB_REGNO_DCSR, dcsr) != ERROR_OK)
+			riscv_reg_set(target, GDB_REGNO_DCSR, dcsr) != ERROR_OK)
 		return ERROR_FAIL;
 	info->dcsr_ebreak_is_set = true;
 	return ERROR_OK;
@@ -2089,11 +1775,10 @@ static int reset_dm(struct target *target)
 			if (result != ERROR_OK)
 				return result;
 
-			if (time(NULL) - start > riscv_reset_timeout_sec) {
-				/* TODO: Introduce a separate timeout for this. */
+			if (time(NULL) - start > riscv_get_command_timeout_sec()) {
 				LOG_TARGET_ERROR(target, "DM didn't acknowledge reset in %d s. "
-						"Increase the timeout with 'riscv set_reset_timeout_sec'.",
-						riscv_reset_timeout_sec);
+						"Increase the timeout with 'riscv set_command_timeout_sec'.",
+						riscv_get_command_timeout_sec());
 				return ERROR_TIMEOUT_REACHED;
 			}
 		} while (get_field32(dmcontrol, DM_DMCONTROL_DMACTIVE));
@@ -2112,11 +1797,10 @@ static int reset_dm(struct target *target)
 		if (result != ERROR_OK)
 			return result;
 
-		if (time(NULL) - start > riscv_reset_timeout_sec) {
-			/* TODO: Introduce a separate timeout for this. */
+		if (time(NULL) - start > riscv_get_command_timeout_sec()) {
 			LOG_TARGET_ERROR(target, "Debug Module did not become active in %d s. "
-					"Increase the timeout with 'riscv set_reset_timeout_sec'.",
-					riscv_reset_timeout_sec);
+					"Increase the timeout with 'riscv set_command_timeout_sec'.",
+					riscv_get_command_timeout_sec());
 			return ERROR_TIMEOUT_REACHED;
 		}
 	} while (!get_field32(dmcontrol, DM_DMCONTROL_DMACTIVE));
@@ -2302,21 +1986,20 @@ static int examine(struct target *target)
 	LOG_TARGET_INFO(target, "datacount=%d progbufsize=%d",
 			info->datacount, info->progbufsize);
 
-	RISCV_INFO(r);
-	r->impebreak = get_field(dmstatus, DM_DMSTATUS_IMPEBREAK);
+	info->impebreak = get_field(dmstatus, DM_DMSTATUS_IMPEBREAK);
 
 	if (!has_sufficient_progbuf(target, 2)) {
 		LOG_TARGET_WARNING(target, "We won't be able to execute fence instructions on this "
 				"target. Memory may not always appear consistent. "
 				"(progbufsize=%d, impebreak=%d)", info->progbufsize,
-				r->impebreak);
+				info->impebreak);
 	}
 
-	if (info->progbufsize < 4 && riscv_enable_virtual) {
-		LOG_TARGET_ERROR(target, "set_enable_virtual is not available on this target. It "
-				"requires a program buffer size of at least 4. (progbufsize=%d) "
-				"Use `riscv set_enable_virtual off` to continue."
-					, info->progbufsize);
+	if (info->progbufsize < 4 && riscv_virt2phys_mode_is_hw(target)) {
+		LOG_TARGET_ERROR(target, "software address translation "
+				"is not available on this target. It requires a "
+				"program buffer size of at least 4. (progbufsize=%d) "
+				"Use `riscv set_enable_virtual off` to continue.", info->progbufsize);
 	}
 
 	/* Don't call any riscv_* functions until after we've counted the number of
@@ -2325,6 +2008,8 @@ static int examine(struct target *target)
 	enum riscv_hart_state state_at_examine_start;
 	if (riscv_get_hart_state(target, &state_at_examine_start) != ERROR_OK)
 		return ERROR_FAIL;
+
+	RISCV_INFO(r);
 	const bool hart_halted_at_examine_start = state_at_examine_start == RISCV_STATE_HALTED;
 	if (!hart_halted_at_examine_start) {
 		r->prepped = true;
@@ -2338,74 +2023,9 @@ static int examine(struct target *target)
 	target->state = TARGET_HALTED;
 	target->debug_reason = hart_halted_at_examine_start ? DBG_REASON_UNDEFINED : DBG_REASON_DBGRQ;
 
-	/* Without knowing anything else we can at least mess with the
-	 * program buffer. */
-	r->progbuf_size = info->progbufsize;
-
-	result = register_read_abstract_with_size(target, NULL, GDB_REGNO_S0, 64);
-	if (result == ERROR_OK)
-		r->xlen = 64;
-	else
-		r->xlen = 32;
-
-	/* Save s0 and s1. The register cache hasn't be initialized yet so we
-	 * need to take care of this manually. */
-	uint64_t s0, s1;
-	if (register_read_abstract(target, &s0, GDB_REGNO_S0) != ERROR_OK) {
-		LOG_TARGET_ERROR(target, "Fatal: Failed to read s0.");
-		return ERROR_FAIL;
-	}
-	if (register_read_abstract(target, &s1, GDB_REGNO_S1) != ERROR_OK) {
-		LOG_TARGET_ERROR(target, "Fatal: Failed to read s1.");
-		return ERROR_FAIL;
-	}
-
-	if (register_read_direct(target, &r->misa, GDB_REGNO_MISA)) {
-		LOG_TARGET_ERROR(target, "Fatal: Failed to read MISA.");
-		return ERROR_FAIL;
-	}
-
-	uint64_t value;
-	if (register_read_direct(target, &value, GDB_REGNO_VLENB) != ERROR_OK) {
-		if (riscv_supports_extension(target, 'V'))
-			LOG_TARGET_WARNING(target, "Couldn't read vlenb; vector register access won't work.");
-		r->vlenb = 0;
-	} else {
-		r->vlenb = value;
-		LOG_TARGET_INFO(target, "Vector support with vlenb=%d", r->vlenb);
-	}
-
-	if (register_read_direct(target, &value, GDB_REGNO_MTOPI) == ERROR_OK) {
-		r->mtopi_readable = true;
-
-		if (register_read_direct(target, &value, GDB_REGNO_MTOPEI) == ERROR_OK) {
-			LOG_TARGET_INFO(target, "S?aia detected with IMSIC");
-			r->mtopei_readable = true;
-		} else {
-			r->mtopei_readable = false;
-			LOG_TARGET_INFO(target, "S?aia detected without IMSIC");
-		}
-	} else {
-		r->mtopi_readable = false;
-	}
-
-	/* Display this as early as possible to help people who are using
-	 * really slow simulators. */
-	LOG_TARGET_DEBUG(target, " XLEN=%d, misa=0x%" PRIx64, r->xlen, r->misa);
-
-	/* Restore s0 and s1. */
-	if (register_write_direct(target, GDB_REGNO_S0, s0) != ERROR_OK) {
-		LOG_TARGET_ERROR(target, "Fatal: Failed to write back s0.");
-		return ERROR_FAIL;
-	}
-	if (register_write_direct(target, GDB_REGNO_S1, s1) != ERROR_OK) {
-		LOG_TARGET_ERROR(target, "Fatal: Failed to write back s1.");
-		return ERROR_FAIL;
-	}
-
-	/* Now init registers based on what we discovered. */
-	if (riscv_init_registers(target) != ERROR_OK)
-		return ERROR_FAIL;
+	result = riscv013_reg_examine_all(target);
+	if (result != ERROR_OK)
+		return result;
 
 	if (set_dcsr_ebreak(target, false) != ERROR_OK)
 		return ERROR_FAIL;
@@ -2486,13 +2106,13 @@ static int riscv013_authdata_write(struct target *target, uint32_t value, unsign
 }
 
 /* Try to find out the widest memory access size depending on the selected memory access methods. */
-static unsigned riscv013_data_bits(struct target *target)
+static unsigned int riscv013_data_bits(struct target *target)
 {
 	RISCV013_INFO(info);
 	RISCV_INFO(r);
 
-	for (unsigned int i = 0; i < RISCV_NUM_MEM_ACCESS_METHODS; i++) {
-		int method = r->mem_access_methods[i];
+	for (unsigned int i = 0; i < r->num_enabled_mem_access_methods; i++) {
+		riscv_mem_access_method_t method = r->mem_access_methods[i];
 
 		if (method == RISCV_MEM_ACCESS_PROGBUF) {
 			if (has_sufficient_progbuf(target, 3))
@@ -2513,9 +2133,9 @@ static unsigned riscv013_data_bits(struct target *target)
 			 * take those into account as well.  For now we assume abstract commands
 			 * support XLEN-wide accesses. */
 			return riscv_xlen(target);
-		} else if (method == RISCV_MEM_ACCESS_UNSPECIFIED)
-			/* No further mem access method to try. */
-			break;
+		} else {
+			assert(false);
+		}
 	}
 	LOG_TARGET_ERROR(target, "Unable to determine supported data bits on this target. Assuming 32 bits.");
 	return 32;
@@ -2564,14 +2184,14 @@ static int try_set_vsew(struct target *target, unsigned int *debug_vsew)
 	/* Set standard element width to match XLEN, for vmv instruction to move
 	 * the least significant bits into a GPR.
 	 */
-	if (riscv_write_register(target, GDB_REGNO_VTYPE, encoded_vsew << 3) != ERROR_OK)
+	if (riscv_reg_write(target, GDB_REGNO_VTYPE, encoded_vsew << 3) != ERROR_OK)
 		return ERROR_FAIL;
 
 	if (encoded_vsew == 3 && r->vsew64_supported == YNM_MAYBE) {
 		/* Check that it's supported. */
 		riscv_reg_t vtype;
 
-		if (riscv_get_register(target, &vtype, GDB_REGNO_VTYPE) != ERROR_OK)
+		if (riscv_reg_get(target, &vtype, GDB_REGNO_VTYPE) != ERROR_OK)
 			return ERROR_FAIL;
 		if (vtype >> (riscv_xlen(target) - 1)) {
 			r->vsew64_supported = YNM_NO;
@@ -2604,9 +2224,9 @@ static int prep_for_vector_access(struct target *target,
 		return ERROR_FAIL;
 
 	/* Save vtype and vl. */
-	if (riscv_get_register(target, orig_vtype, GDB_REGNO_VTYPE) != ERROR_OK)
+	if (riscv_reg_get(target, orig_vtype, GDB_REGNO_VTYPE) != ERROR_OK)
 		return ERROR_FAIL;
-	if (riscv_get_register(target, orig_vl, GDB_REGNO_VL) != ERROR_OK)
+	if (riscv_reg_get(target, orig_vl, GDB_REGNO_VL) != ERROR_OK)
 		return ERROR_FAIL;
 
 	if (try_set_vsew(target, debug_vsew) != ERROR_OK)
@@ -2615,22 +2235,22 @@ static int prep_for_vector_access(struct target *target,
 	 * instruction, for the vslide1down instruction.
 	 * Set it so the entire V register is updated. */
 	*debug_vl = DIV_ROUND_UP(r->vlenb * 8, *debug_vsew);
-	return riscv_write_register(target, GDB_REGNO_VL, *debug_vl);
+	return riscv_reg_write(target, GDB_REGNO_VL, *debug_vl);
 }
 
 static int cleanup_after_vector_access(struct target *target,
 		riscv_reg_t mstatus, riscv_reg_t vtype, riscv_reg_t vl)
 {
 	/* Restore vtype and vl. */
-	if (riscv_write_register(target, GDB_REGNO_VTYPE, vtype) != ERROR_OK)
+	if (riscv_reg_write(target, GDB_REGNO_VTYPE, vtype) != ERROR_OK)
 		return ERROR_FAIL;
-	if (riscv_write_register(target, GDB_REGNO_VL, vl) != ERROR_OK)
+	if (riscv_reg_write(target, GDB_REGNO_VL, vl) != ERROR_OK)
 		return ERROR_FAIL;
 	return cleanup_after_register_access(target, mstatus, GDB_REGNO_VL);
 }
 
-static int riscv013_get_register_buf(struct target *target,
-		uint8_t *value, enum gdb_regno regno)
+int riscv013_get_register_buf(struct target *target, uint8_t *value,
+		enum gdb_regno regno)
 {
 	assert(regno >= GDB_REGNO_V0 && regno <= GDB_REGNO_V31);
 
@@ -2644,7 +2264,7 @@ static int riscv013_get_register_buf(struct target *target,
 				&debug_vl, &debug_vsew) != ERROR_OK)
 		return ERROR_FAIL;
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 
 	unsigned int vnum = regno - GDB_REGNO_V0;
@@ -2673,7 +2293,7 @@ static int riscv013_get_register_buf(struct target *target,
 		} else {
 			LOG_TARGET_ERROR(target,
 					"Failed to execute vmv/vslide1down while reading %s",
-					gdb_regno_name(target, regno));
+					riscv_reg_gdb_regno_name(target, regno));
 			break;
 		}
 	}
@@ -2684,8 +2304,8 @@ static int riscv013_get_register_buf(struct target *target,
 	return result;
 }
 
-static int riscv013_set_register_buf(struct target *target,
-		enum gdb_regno regno, const uint8_t *value)
+int riscv013_set_register_buf(struct target *target, enum gdb_regno regno,
+		const uint8_t *value)
 {
 	assert(regno >= GDB_REGNO_V0 && regno <= GDB_REGNO_V31);
 
@@ -2699,7 +2319,7 @@ static int riscv013_set_register_buf(struct target *target,
 				&debug_vl, &debug_vsew) != ERROR_OK)
 		return ERROR_FAIL;
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
 
 	unsigned int vnum = regno - GDB_REGNO_V0;
@@ -2741,54 +2361,63 @@ static uint32_t sb_sbaccess(unsigned int size_bytes)
 	return 0;
 }
 
-static int sb_write_address(struct target *target, target_addr_t address,
-							bool ensure_success)
+static unsigned int get_sbaadress_reg_count(const struct target *target)
 {
 	RISCV013_INFO(info);
-	unsigned int sbasize = get_field(info->sbcs, DM_SBCS_SBASIZE);
-	/* There currently is no support for >64-bit addresses in OpenOCD. */
-	if (sbasize > 96)
-		dm_op(target, NULL, NULL, DMI_OP_WRITE, DM_SBADDRESS3, 0, false, false);
-	if (sbasize > 64)
-		dm_op(target, NULL, NULL, DMI_OP_WRITE, DM_SBADDRESS2, 0, false, false);
-	if (sbasize > 32)
-		dm_op(target, NULL, NULL, DMI_OP_WRITE, DM_SBADDRESS1,
-			(uint32_t)(address >> 32), false, false);
-	return dm_op(target, NULL, NULL, DMI_OP_WRITE, DM_SBADDRESS0,
-		(uint32_t)address, false, ensure_success);
+	const unsigned int sbasize = get_field(info->sbcs, DM_SBCS_SBASIZE);
+	return DIV_ROUND_UP(sbasize, 32);
 }
 
-/* TODO: store delays in "struct riscv_scan_delays" and remove this function. */
-struct riscv_scan_delays get_scan_delays(struct target *target)
+static void batch_fill_sb_write_address(const struct target *target,
+		struct riscv_batch *batch, target_addr_t address,
+		enum riscv_scan_delay_class sbaddr0_delay)
 {
-	RISCV013_INFO(info);
-	assert(info);
-	struct riscv_scan_delays delays;
-	riscv_scan_set_delay(&delays, RISCV_DELAY_BASE, info->dmi_busy_delay);
-	riscv_scan_set_delay(&delays, RISCV_DELAY_ABSTRACT_COMMAND, info->dmi_busy_delay +
-		info->ac_busy_delay);
-	riscv_scan_set_delay(&delays, RISCV_DELAY_SYSBUS_READ, info->dmi_busy_delay +
-		info->bus_master_read_delay);
-	riscv_scan_set_delay(&delays, RISCV_DELAY_SYSBUS_WRITE, info->dmi_busy_delay +
-		info->bus_master_write_delay);
-	return delays;
+	/* There currently is no support for >64-bit addresses in OpenOCD. */
+	assert(sizeof(target_addr_t) == sizeof(uint64_t));
+	const uint32_t addresses[] = {DM_SBADDRESS0, DM_SBADDRESS1, DM_SBADDRESS2, DM_SBADDRESS3};
+	const uint32_t values[] = {(uint32_t)address, (uint32_t)(address >> 32), 0, 0};
+	const unsigned int reg_count = get_sbaadress_reg_count(target);
+	assert(reg_count > 0);
+	assert(reg_count <= ARRAY_SIZE(addresses));
+	assert(ARRAY_SIZE(addresses) == ARRAY_SIZE(values));
+
+	for (unsigned int i = reg_count - 1; i > 0; --i)
+		riscv_batch_add_dm_write(batch, addresses[i], values[i], /* read back */ true,
+				RISCV_DELAY_BASE);
+	riscv_batch_add_dm_write(batch, addresses[0], values[0], /* read back */ true,
+			sbaddr0_delay);
+}
+
+static int sb_write_address(struct target *target, target_addr_t address,
+		enum riscv_scan_delay_class sbaddr0_delay)
+{
+	struct riscv_batch *batch = riscv_batch_alloc(target,
+			get_sbaadress_reg_count(target));
+	batch_fill_sb_write_address(target, batch, address, sbaddr0_delay);
+	const int res = batch_run_timeout(target, batch);
+	riscv_batch_free(batch);
+	return res;
 }
 
 static int batch_run(struct target *target, struct riscv_batch *batch)
 {
 	RISCV_INFO(r);
+	RISCV013_INFO(info);
 	select_dmi(target);
 	riscv_batch_add_nop(batch);
-	const int result = riscv_batch_run_from(batch, 0,
-			get_scan_delays(target),
+	const int result = riscv_batch_run_from(batch, 0, &info->learned_delays,
 			/*resets_delays*/  r->reset_delays_wait >= 0,
 			r->reset_delays_wait);
+	if (result != ERROR_OK)
+		return result;
 	/* TODO: To use `riscv_batch_finished_scans()` here, it is needed for
 	 * all scans to not discard input, meaning
 	 * "riscv_batch_add_dm_write(..., false)" should not be used. */
 	const size_t finished_scans = batch->used_scans;
 	decrement_reset_delays_counter(target, finished_scans);
-	return result;
+	if (riscv_batch_was_batch_busy(batch))
+		return increase_dmi_busy_delay(target);
+	return ERROR_OK;
 }
 
 /* It is expected that during creation of the batch
@@ -2797,45 +2426,49 @@ static int batch_run(struct target *target, struct riscv_batch *batch)
 static int batch_run_timeout(struct target *target, struct riscv_batch *batch)
 {
 	RISCV013_INFO(info);
-
 	select_dmi(target);
 	riscv_batch_add_nop(batch);
 
 	size_t finished_scans = 0;
 	const time_t start = time(NULL);
-	const unsigned int old_dmi_busy_delay = info->dmi_busy_delay;
+	const unsigned int old_base_delay = riscv_scan_get_delay(&info->learned_delays,
+			RISCV_DELAY_BASE);
 	int result;
 	do {
 		RISCV_INFO(r);
 		result = riscv_batch_run_from(batch, finished_scans,
-				get_scan_delays(target),
+				&info->learned_delays,
 				/*resets_delays*/  r->reset_delays_wait >= 0,
 				r->reset_delays_wait);
+		if (result != ERROR_OK)
+			return result;
 		const size_t new_finished_scans = riscv_batch_finished_scans(batch);
 		assert(new_finished_scans >= finished_scans);
 		decrement_reset_delays_counter(target, new_finished_scans - finished_scans);
 		finished_scans = new_finished_scans;
-		if (result != ERROR_OK)
-			return result;
 		if (!riscv_batch_was_batch_busy(batch)) {
 			assert(finished_scans == batch->used_scans);
 			return ERROR_OK;
 		}
-		increase_dmi_busy_delay(target);
-	} while (time(NULL) - start < riscv_command_timeout_sec);
+		result = increase_dmi_busy_delay(target);
+		if (result != ERROR_OK)
+			return result;
+	} while (time(NULL) - start < riscv_get_command_timeout_sec());
 
 	assert(result == ERROR_OK);
 	assert(riscv_batch_was_batch_busy(batch));
 
 	/* Reset dmi_busy_delay, so the value doesn't get too big. */
-	LOG_TARGET_DEBUG(target, "dmi_busy_delay is restored to %u.",
-			old_dmi_busy_delay);
-	info->dmi_busy_delay = old_dmi_busy_delay;
+	LOG_TARGET_DEBUG(target, "%s delay is restored to %u.",
+			riscv_scan_delay_class_name(RISCV_DELAY_BASE),
+			old_base_delay);
+	riscv_scan_set_delay(&info->learned_delays, RISCV_DELAY_BASE,
+			old_base_delay);
 
 	LOG_TARGET_ERROR(target, "DMI operation didn't complete in %d seconds. "
 			"The target is either really slow or broken. You could increase "
 			"the timeout with riscv set_command_timeout_sec.",
-			riscv_command_timeout_sec);
+			riscv_get_command_timeout_sec());
 	return ERROR_TIMEOUT_REACHED;
 }
 
@@ -2969,7 +2602,11 @@ static int sample_memory_bus_v1(struct target *target,
 		 * with a larger DMI delay. */
 		unsigned int sbcs_read_op = riscv_batch_get_dmi_read_op(batch, sbcs_read_index);
 		if (sbcs_read_op == DTM_DMI_OP_BUSY) {
-			increase_dmi_busy_delay(target);
+			result = increase_dmi_busy_delay(target);
+			if (result != ERROR_OK) {
+				riscv_batch_free(batch);
+				return result;
+			}
 			continue;
 		}
 
@@ -2977,9 +2614,12 @@ static int sample_memory_bus_v1(struct target *target,
 		if (get_field(sbcs_read, DM_SBCS_SBBUSYERROR)) {
 			/* Discard this batch when we encounter "busy error" state on the System Bus level.
 			 * We'll try next time with a larger System Bus read delay. */
-			info->bus_master_read_delay += info->bus_master_read_delay / 10 + 1;
 			dm_write(target, DM_SBCS, sbcs_read | DM_SBCS_SBBUSYERROR | DM_SBCS_SBERROR);
+			int res = riscv_scan_increase_delay(&info->learned_delays,
+					RISCV_DELAY_SYSBUS_READ);
 			riscv_batch_free(batch);
+			if (res != ERROR_OK)
+				return res;
 			continue;
 		}
 		if (get_field(sbcs_read, DM_SBCS_SBERROR)) {
@@ -3098,10 +2738,6 @@ static int init_target(struct command_context *cmd_ctx,
 	LOG_TARGET_DEBUG(target, "Init.");
 	RISCV_INFO(generic_info);
 
-	generic_info->get_register = &riscv013_get_register;
-	generic_info->set_register = &riscv013_set_register;
-	generic_info->get_register_buf = &riscv013_get_register_buf;
-	generic_info->set_register_buf = &riscv013_set_register_buf;
 	generic_info->select_target = &dm013_select_target;
 	generic_info->get_hart_state = &riscv013_get_hart_state;
 	generic_info->resume_go = &riscv013_resume_go;
@@ -3115,8 +2751,8 @@ static int init_target(struct command_context *cmd_ctx,
 	generic_info->write_progbuf = &riscv013_write_progbuf;
 	generic_info->execute_progbuf = &riscv013_execute_progbuf;
 	generic_info->invalidate_cached_progbuf = &riscv013_invalidate_cached_progbuf;
-	generic_info->fill_dm_write = &riscv013_fill_dm_write;
-	generic_info->fill_dm_read = &riscv013_fill_dm_read;
+	generic_info->fill_dmi_write = &riscv013_fill_dmi_write;
+	generic_info->fill_dmi_read = &riscv013_fill_dmi_read;
 	generic_info->fill_dm_nop = &riscv013_fill_dm_nop;
 	generic_info->get_dmi_scan_length = &riscv013_get_dmi_scan_length;
 	generic_info->authdata_read = &riscv013_authdata_read;
@@ -3127,6 +2763,8 @@ static int init_target(struct command_context *cmd_ctx,
 	generic_info->read_memory = read_memory;
 	generic_info->data_bits = &riscv013_data_bits;
 	generic_info->print_info = &riscv013_print_info;
+	generic_info->get_impebreak = &riscv013_get_impebreak;
+	generic_info->get_progbufsize = &riscv013_get_progbufsize;
 
 	generic_info->handle_became_unavailable = &handle_became_unavailable;
 	generic_info->tick = &tick;
@@ -3140,11 +2778,7 @@ static int init_target(struct command_context *cmd_ctx,
 	riscv013_info_t *info = get_info(target);
 
 	info->progbufsize = -1;
-
-	info->dmi_busy_delay = 0;
-	info->bus_master_read_delay = 0;
-	info->bus_master_write_delay = 0;
-	info->ac_busy_delay = 0;
+	reset_learned_delays(target);
 
 	/* Assume all these abstract commands are supported until we learn
 	 * otherwise.
@@ -3203,6 +2837,12 @@ static int assert_reset(struct target *target)
 	return riscv013_invalidate_cached_progbuf(target);
 }
 
+static bool dcsr_ebreak_config_equals_reset_value(const struct target *target)
+{
+	RISCV_INFO(r);
+	return !(r->riscv_ebreakm || r->riscv_ebreaks || r->riscv_ebreaku);
+}
+
 static int deassert_reset(struct target *target)
 {
 	RISCV013_INFO(info);
@@ -3231,25 +2871,20 @@ static int deassert_reset(struct target *target)
 		return result;
 
 	uint32_t dmstatus;
-	const int orig_dmi_busy_delay = info->dmi_busy_delay;
+	const unsigned int orig_base_delay = riscv_scan_get_delay(&info->learned_delays,
+			RISCV_DELAY_BASE);
 	time_t start = time(NULL);
 	LOG_TARGET_DEBUG(target, "Waiting for hart to come out of reset.");
 	do {
-		result = dmstatus_read_timeout(target, &dmstatus, true,
-				riscv_reset_timeout_sec);
-		if (result == ERROR_TIMEOUT_REACHED)
-			LOG_TARGET_ERROR(target, "Hart didn't complete a DMI read coming "
-					"out of reset in %ds; Increase the timeout with riscv "
-					"set_reset_timeout_sec.",
-					riscv_reset_timeout_sec);
+		result = dmstatus_read(target, &dmstatus, true);
 		if (result != ERROR_OK)
 			return result;
 
-		if (time(NULL) - start > riscv_reset_timeout_sec) {
+		if (time(NULL) - start > riscv_get_command_timeout_sec()) {
 			LOG_TARGET_ERROR(target, "Hart didn't leave reset in %ds; "
 					"dmstatus=0x%x (allunavail=%s, allhavereset=%s); "
-					"Increase the timeout with riscv set_reset_timeout_sec.",
-					riscv_reset_timeout_sec, dmstatus,
+					"Increase the timeout with riscv set_command_timeout_sec.",
+					riscv_get_command_timeout_sec(), dmstatus,
 					get_field(dmstatus, DM_DMSTATUS_ALLUNAVAIL) ? "true" : "false",
 					get_field(dmstatus, DM_DMSTATUS_ALLHAVERESET) ? "true" : "false");
 			return ERROR_TIMEOUT_REACHED;
@@ -3264,7 +2899,17 @@ static int deassert_reset(struct target *target)
 	} while (get_field(dmstatus, DM_DMSTATUS_ALLUNAVAIL) &&
 			!get_field(dmstatus, DM_DMSTATUS_ALLHAVERESET));
 
-	info->dmi_busy_delay = orig_dmi_busy_delay;
+	riscv_scan_set_delay(&info->learned_delays, RISCV_DELAY_BASE,
+			orig_base_delay);
+
+	/* Ack reset and clear DM_DMCONTROL_HALTREQ if previously set */
+	control = 0;
+	control = set_field(control, DM_DMCONTROL_DMACTIVE, 1);
+	control = set_field(control, DM_DMCONTROL_ACKHAVERESET, 1);
+	control = set_dmcontrol_hartsel(control, info->index);
+	result = dm_write(target, DM_DMCONTROL, control);
+	if (result != ERROR_OK)
+		return result;
 
 	if (target->reset_halt) {
 		target->state = TARGET_HALTED;
@@ -3273,14 +2918,8 @@ static int deassert_reset(struct target *target)
 		target->state = TARGET_RUNNING;
 		target->debug_reason = DBG_REASON_NOTHALTED;
 	}
-	info->dcsr_ebreak_is_set = false;
-
-	/* Ack reset and clear DM_DMCONTROL_HALTREQ if previously set */
-	control = 0;
-	control = set_field(control, DM_DMCONTROL_DMACTIVE, 1);
-	control = set_field(control, DM_DMCONTROL_ACKHAVERESET, 1);
-	control = set_dmcontrol_hartsel(control, info->index);
-	return dm_write(target, DM_DMCONTROL, control);
+	info->dcsr_ebreak_is_set = dcsr_ebreak_config_equals_reset_value(target);
+	return ERROR_OK;
 }
 
 static int execute_fence(struct target *target)
@@ -3413,7 +3052,7 @@ static int read_memory_bus_word(struct target *target, target_addr_t address,
 static target_addr_t sb_read_address(struct target *target)
 {
 	RISCV013_INFO(info);
-	unsigned sbasize = get_field(info->sbcs, DM_SBCS_SBASIZE);
+	unsigned int sbasize = get_field(info->sbcs, DM_SBCS_SBASIZE);
 	target_addr_t address = 0;
 	uint32_t v;
 	if (sbasize > 32) {
@@ -3434,10 +3073,10 @@ static int read_sbcs_nonbusy(struct target *target, uint32_t *sbcs)
 			return ERROR_FAIL;
 		if (!get_field(*sbcs, DM_SBCS_SBBUSY))
 			return ERROR_OK;
-		if (time(NULL) - start > riscv_command_timeout_sec) {
+		if (time(NULL) - start > riscv_get_command_timeout_sec()) {
 			LOG_TARGET_ERROR(target, "Timed out after %ds waiting for sbbusy to go low (sbcs=0x%x). "
 					"Increase the timeout with riscv set_command_timeout_sec.",
-					riscv_command_timeout_sec, *sbcs);
+					riscv_get_command_timeout_sec(), *sbcs);
 			return ERROR_FAIL;
 		}
 	}
@@ -3445,7 +3084,8 @@ static int read_sbcs_nonbusy(struct target *target, uint32_t *sbcs)
 
 static int modify_privilege(struct target *target, uint64_t *mstatus, uint64_t *mstatus_old)
 {
-	if (riscv_enable_virtual && has_sufficient_progbuf(target, 5)) {
+	if (riscv_virt2phys_mode_is_hw(target)
+			&& has_sufficient_progbuf(target, 5)) {
 		/* Read DCSR */
 		uint64_t dcsr;
 		if (register_read_direct(target, &dcsr, GDB_REGNO_DCSR) != ERROR_OK)
@@ -3571,6 +3211,9 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 		return ERROR_NOT_IMPLEMENTED;
 	}
 
+	assert(size <= 16);
+	assert(IS_PWR_OF_2(size));
+
 	dm013_info_t *dm = get_dm(target);
 	if (!dm)
 		return ERROR_FAIL;
@@ -3579,6 +3222,9 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 	target_addr_t next_address = address;
 	target_addr_t end_address = address + (increment ? count : 1) * size;
 
+	/* TODO: Reading all the elements in a single batch will boost the
+	 * performance.
+	 */
 	while (next_address < end_address) {
 		uint32_t sbcs_write = set_field(0, DM_SBCS_SBREADONADDR, 1);
 		sbcs_write |= sb_sbaccess(size);
@@ -3590,92 +3236,50 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 			return ERROR_FAIL;
 
 		/* This address write will trigger the first read. */
-		if (sb_write_address(target, next_address, true) != ERROR_OK)
+		if (sb_write_address(target, next_address, RISCV_DELAY_SYSBUS_READ) != ERROR_OK)
 			return ERROR_FAIL;
-
-		if (info->bus_master_read_delay) {
-			LOG_TARGET_DEBUG(target, "Waiting %d cycles for bus master read delay",
-					info->bus_master_read_delay);
-			jtag_add_runtest(info->bus_master_read_delay, TAP_IDLE);
-			if (jtag_execute_queue() != ERROR_OK) {
-				LOG_TARGET_ERROR(target, "Failed to scan idle sequence");
-				return ERROR_FAIL;
-			}
-		}
 
 		/* First read has been started. Optimistically assume that it has
 		 * completed. */
 
 		static int sbdata[4] = {DM_SBDATA0, DM_SBDATA1, DM_SBDATA2, DM_SBDATA3};
+		/* TODO: The only purpose of "sbvalue" is to be passed to
+		 * "log_memory_access()".  If "log_memory_access()" were to
+		 * accept "uint8_t *" instead of "uint32_t *", "sbvalue" would
+		 * be unnecessary.
+		 */
 		uint32_t sbvalue[4] = {0};
-		assert(size <= 16);
-		target_addr_t next_read = address - 1;
-		uint32_t buffer_offset = 0;
-		int next_read_j = 0;
 		for (uint32_t i = (next_address - address) / size; i < count - 1; i++) {
-			for (int j = (size - 1) / 4; j >= 0; j--) {
-				unsigned attempt = 0;
-				while (1) {
-					if (attempt++ > 100) {
-						LOG_TARGET_ERROR(target, "DMI keeps being busy in while reading memory"
-							" just past " TARGET_ADDR_FMT, next_read);
-						return ERROR_FAIL;
-					}
-					keep_alive();
-					dmi_status_t status = dmi_scan(target, NULL, &sbvalue[next_read_j],
-								       DMI_OP_READ, sbdata[j] + dm->base, 0, false);
-					/* By reading from sbdata0, we have just initiated another system bus read.
-					 * If necessary add a delay so the read can finish. */
-					if (j == 0 && info->bus_master_read_delay) {
-						LOG_TARGET_DEBUG(target, "Waiting %d cycles for bus master read delay",
-								info->bus_master_read_delay);
-						jtag_add_runtest(info->bus_master_read_delay, TAP_IDLE);
-						if (jtag_execute_queue() != ERROR_OK) {
-							LOG_TARGET_ERROR(target, "Failed to scan idle sequence");
-							return ERROR_FAIL;
-						}
-					}
+			const uint32_t size_in_words = DIV_ROUND_UP(size, 4);
+			struct riscv_batch *batch = riscv_batch_alloc(target, size_in_words);
+			/* Read of sbdata0 must be performed as last because it
+			 * starts the new bus data transfer
+			 * (in case "sbcs.sbreadondata" was set above).
+			 * We don't want to start the next bus read before we
+			 * fetch all the data from the last bus read. */
+			for (uint32_t j = size_in_words - 1; j > 0; --j)
+				riscv_batch_add_dm_read(batch, sbdata[j], RISCV_DELAY_BASE);
+			riscv_batch_add_dm_read(batch, sbdata[0], RISCV_DELAY_SYSBUS_READ);
 
-					if (status == DMI_STATUS_BUSY)
-						increase_dmi_busy_delay(target);
-					else if (status == DMI_STATUS_SUCCESS)
-						break;
-					else
-						return ERROR_FAIL;
-				}
-				if (next_read != address - 1) {
-					buf_set_u32(buffer + buffer_offset, 0, 8 * MIN(size, 4), sbvalue[next_read_j]);
-					if (next_read_j == 0) {
-						log_memory_access(next_read, sbvalue, size, true);
-						memset(sbvalue, 0, size);
-					}
-				}
-				next_read_j = j;
-				next_read = address + i * increment + next_read_j * 4;
-				buffer_offset = i * size + next_read_j * 4;
+			int res = batch_run_timeout(target, batch);
+			if (res != ERROR_OK) {
+				riscv_batch_free(batch);
+				return res;
 			}
+
+			const size_t last_key = batch->read_keys_used - 1;
+			for (size_t k = 0; k <= last_key; ++k) {
+				sbvalue[k] = riscv_batch_get_dmi_read_data(batch, last_key - k);
+				buf_set_u32(buffer + i * size + k * 4, 0, MIN(32, 8 * size), sbvalue[k]);
+			}
+
+			riscv_batch_free(batch);
+			const target_addr_t read_addr = address + i * increment;
+			log_memory_access(read_addr, sbvalue, size, true);
 		}
 
 		uint32_t sbcs_read = 0;
 		if (count > 1) {
-			unsigned attempt = 0;
-			while (1) {
-				if (attempt++ > 100) {
-					LOG_TARGET_ERROR(target, "DMI keeps being busy in while reading memory"
-						" just past " TARGET_ADDR_FMT, next_read);
-					return ERROR_FAIL;
-				}
-				dmi_status_t status = dmi_scan(target, NULL, &sbvalue[0], DMI_OP_NOP, 0, 0, false);
-				if (status == DMI_STATUS_BUSY)
-					increase_dmi_busy_delay(target);
-				else if (status == DMI_STATUS_SUCCESS)
-					break;
-				else
-					return ERROR_FAIL;
-			}
-			buf_set_u32(buffer + buffer_offset, 0, 8 * MIN(size, 4), sbvalue[0]);
-			log_memory_access(next_read, sbvalue, size, true);
-
 			/* "Writes to sbcs while sbbusy is high result in undefined behavior.
 			 * A debugger must not write to sbcs until it reads sbbusy as 0." */
 			if (read_sbcs_nonbusy(target, &sbcs_read) != ERROR_OK)
@@ -3716,13 +3320,14 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 					return ERROR_FAIL;
 			}
 
-			info->bus_master_read_delay += info->bus_master_read_delay / 10 + 1;
-			LOG_TARGET_DEBUG(target, "Increasing bus_master_read_delay to %d.",
-					info->bus_master_read_delay);
+			int res = riscv_scan_increase_delay(&info->learned_delays,
+					RISCV_DELAY_SYSBUS_READ);
+			if (res != ERROR_OK)
+				return res;
 			continue;
 		}
 
-		unsigned error = get_field(sbcs_read, DM_SBCS_SBERROR);
+		unsigned int error = get_field(sbcs_read, DM_SBCS_SBERROR);
 		if (error == DM_SBCS_SBERROR_NONE) {
 			next_address = end_address;
 		} else {
@@ -3737,7 +3342,7 @@ static int read_memory_bus_v1(struct target *target, target_addr_t address,
 	return ERROR_OK;
 }
 
-static void log_mem_access_result(struct target *target, bool success, int method, bool is_read)
+static void log_mem_access_result(struct target *target, bool success, riscv_mem_access_method_t method, bool is_read)
 {
 	RISCV_INFO(r);
 	bool warn = false;
@@ -3752,18 +3357,8 @@ static void log_mem_access_result(struct target *target, bool success, int metho
 
 	/* Determine the log message severity. Show warnings only once. */
 	if (!success) {
-		if (method == RISCV_MEM_ACCESS_PROGBUF) {
-			warn = r->mem_access_progbuf_warn;
-			r->mem_access_progbuf_warn = false;
-		}
-		if (method == RISCV_MEM_ACCESS_SYSBUS) {
-			warn = r->mem_access_sysbus_warn;
-			r->mem_access_sysbus_warn = false;
-		}
-		if (method == RISCV_MEM_ACCESS_ABSTRACT) {
-			warn = r->mem_access_abstract_warn;
-			r->mem_access_abstract_warn = false;
-		}
+		warn = r->mem_access_warn[method];
+		r->mem_access_warn[method] = false;
 	}
 
 	if (warn)
@@ -3772,101 +3367,180 @@ static void log_mem_access_result(struct target *target, bool success, int metho
 		LOG_TARGET_DEBUG(target, "%s", msg);
 }
 
-static bool mem_should_skip_progbuf(struct target *target, target_addr_t address,
-		uint32_t size, bool is_read, char **skip_reason)
+typedef enum {
+	MEM_ACCESS_RESULT_TYPE_OK,
+	MEM_ACCESS_RESULT_TYPE_DISABLED,
+	MEM_ACCESS_RESULT_TYPE_SKIPPED,
+	MEM_ACCESS_RESULT_TYPE_FAILED
+} mem_access_result_type_t;
+
+#define LIST_OF_MEM_ACCESS_RESULTS                                                    \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_OK,                                          \
+			MEM_ACCESS_RESULT_TYPE_OK, "ok")                                          \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_DISABLED,                                    \
+			MEM_ACCESS_RESULT_TYPE_DISABLED, "disabled")                              \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_ABSTRACT_ACCESS_CMDERR,              \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (abstract access cmderr)")       \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_PROGBUF_NOT_PRESENT,                 \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (progbuf not present)")          \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_PROGBUF_INSUFFICIENT,                \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (insufficient progbuf)")         \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_UNSUPPORTED_ACCESS_SIZE,             \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (unsupported access size)")      \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_XLEN_TOO_SHORT,                      \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (xlen too short)")               \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_TARGET_NOT_HALTED,                   \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (target not halted)")            \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_TOO_LARGE_ADDRESS,                   \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (address too large)")            \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_UNSUPPORTED_INCREMENT_SIZE,          \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (increment size not supported)") \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_TARGET_SELECT_FAILED,                \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (dm target select failed)")      \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_SKIPPED_FENCE_EXEC_FAILED,                   \
+			MEM_ACCESS_RESULT_TYPE_SKIPPED, "skipped (fence execution failed)")       \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_FAILED,                                      \
+			MEM_ACCESS_RESULT_TYPE_FAILED, "failed")                                  \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_FAILED_DM_ACCESS_FAILED,                     \
+			MEM_ACCESS_RESULT_TYPE_FAILED, "failed (DM register access failed)")      \
+	MEM_ACCESS_RESULT_HANDLER(MEM_ACCESS_FAILED_PRIV_MOD_FAILED,                      \
+			MEM_ACCESS_RESULT_TYPE_FAILED, "failed (privilege modification failed)")  \
+
+
+#define MEM_ACCESS_RESULT_HANDLER(name, kind, msg) name,
+typedef enum {
+	LIST_OF_MEM_ACCESS_RESULTS
+} mem_access_result_t;
+#undef MEM_ACCESS_RESULT_HANDLER
+
+bool is_mem_access_failed(mem_access_result_t status)
 {
-	assert(skip_reason);
-
-	if (!has_sufficient_progbuf(target, 3)) {
-		LOG_TARGET_DEBUG(target, "Skipping mem %s via progbuf - insufficient progbuf size.",
-				is_read ? "read" : "write");
-		*skip_reason = "skipped (insufficient progbuf)";
-		return true;
+	#define MEM_ACCESS_RESULT_HANDLER(name, kind, msg) \
+		case name: return kind == MEM_ACCESS_RESULT_TYPE_FAILED;
+	switch (status) {
+		LIST_OF_MEM_ACCESS_RESULTS
 	}
-	if (target->state != TARGET_HALTED) {
-		LOG_TARGET_DEBUG(target, "Skipping mem %s via progbuf - target not halted.",
-				is_read ? "read" : "write");
-		*skip_reason = "skipped (target not halted)";
-		return true;
-	}
-	if (riscv_xlen(target) < size * 8) {
-		LOG_TARGET_DEBUG(target, "Skipping mem %s via progbuf - XLEN (%d) is too short for %d-bit memory access.",
-				is_read ? "read" : "write", riscv_xlen(target), size * 8);
-		*skip_reason = "skipped (XLEN too short)";
-		return true;
-	}
-	if (size > 8) {
-		LOG_TARGET_DEBUG(target, "Skipping mem %s via progbuf - unsupported size.",
-				is_read ? "read" : "write");
-		*skip_reason = "skipped (unsupported size)";
-		return true;
-	}
-	if ((sizeof(address) * 8 > riscv_xlen(target)) && (address >> riscv_xlen(target))) {
-		LOG_TARGET_DEBUG(target, "Skipping mem %s via progbuf - progbuf only supports %u-bit address.",
-				is_read ? "read" : "write", riscv_xlen(target));
-		*skip_reason = "skipped (too large address)";
-		return true;
-	}
-
+	#undef MEM_ACCESS_RESULT_HANDLER
+	LOG_ERROR("Unknown memory access status: %d", status);
+	assert(false);
 	return false;
 }
 
-static bool mem_should_skip_sysbus(struct target *target, target_addr_t address,
-		uint32_t size, uint32_t increment, bool is_read, char **skip_reason)
+bool is_mem_access_skipped(mem_access_result_t status)
 {
-	assert(skip_reason);
+	#define MEM_ACCESS_RESULT_HANDLER(name, kind, msg) \
+		case name: return kind == MEM_ACCESS_RESULT_TYPE_SKIPPED;
+	switch (status) {
+		LIST_OF_MEM_ACCESS_RESULTS
+	}
+	#undef MEM_ACCESS_RESULT_HANDLER
+	LOG_ERROR("Unknown memory access status: %d", status);
+	assert(false);
+	return false;
+}
 
+const char *mem_access_result_to_str(mem_access_result_t status)
+{
+	#define MEM_ACCESS_RESULT_HANDLER(name, kind, msg) \
+		[name] = msg,
+	static const char * const table[] = {
+		LIST_OF_MEM_ACCESS_RESULTS
+	};
+	#undef MEM_ACCESS_RESULT_HANDLER
+
+	assert(status < ARRAY_SIZE(table));
+	return table[status];
+}
+
+static mem_access_result_t mem_should_skip_progbuf(struct target *target,
+	target_addr_t address, uint32_t size, bool is_read)
+{
+	if (!has_sufficient_progbuf(target, 1)) {
+		LOG_TARGET_DEBUG(target, "Skipping mem %s via progbuf "
+				"- progbuf not present", is_read ? "read" : "write");
+		return MEM_ACCESS_SKIPPED_PROGBUF_NOT_PRESENT;
+	}
+	if (!has_sufficient_progbuf(target, 3)) {
+		LOG_TARGET_DEBUG(target, "Skipping mem %s via progbuf - insufficient progbuf size.",
+				is_read ? "read" : "write");
+		return MEM_ACCESS_SKIPPED_PROGBUF_INSUFFICIENT;
+	}
+	if (target->state != TARGET_HALTED) {
+		LOG_TARGET_DEBUG(target,
+			"Skipping mem %s via progbuf - target not halted.",
+			is_read ? "read" : "write");
+		return MEM_ACCESS_SKIPPED_TARGET_NOT_HALTED;
+	}
+	if (riscv_xlen(target) < size * 8) {
+		LOG_TARGET_DEBUG(target,
+			"Skipping mem %s via progbuf - "
+			"XLEN (%d) is too short for %d-bit memory access.",
+			is_read ? "read" : "write", riscv_xlen(target), size * 8);
+		return MEM_ACCESS_SKIPPED_XLEN_TOO_SHORT;
+	}
+	if (size > 8) {
+		LOG_TARGET_DEBUG(target,
+			"Skipping mem %s via progbuf - unsupported size.",
+			is_read ? "read" : "write");
+		return MEM_ACCESS_SKIPPED_UNSUPPORTED_ACCESS_SIZE;
+	}
+	if ((sizeof(address) * 8 > riscv_xlen(target)) && (address >> riscv_xlen(target))) {
+		LOG_TARGET_DEBUG(target,
+			"Skipping mem %s via progbuf - progbuf only supports %u-bit address.",
+			is_read ? "read" : "write", riscv_xlen(target));
+		return MEM_ACCESS_SKIPPED_TOO_LARGE_ADDRESS;
+	}
+
+	return MEM_ACCESS_OK;
+}
+
+static mem_access_result_t
+mem_should_skip_sysbus(struct target *target, target_addr_t address,
+	uint32_t size, uint32_t increment, bool is_read)
+{
 	RISCV013_INFO(info);
 	if (!sba_supports_access(target, size)) {
 		LOG_TARGET_DEBUG(target, "Skipping mem %s via system bus - unsupported size.",
 				is_read ? "read" : "write");
-		*skip_reason = "skipped (unsupported size)";
-		return true;
+		return MEM_ACCESS_SKIPPED_UNSUPPORTED_ACCESS_SIZE;
 	}
 	unsigned int sbasize = get_field(info->sbcs, DM_SBCS_SBASIZE);
 	if ((sizeof(address) * 8 > sbasize) && (address >> sbasize)) {
 		LOG_TARGET_DEBUG(target, "Skipping mem %s via system bus - sba only supports %u-bit address.",
 				is_read ? "read" : "write", sbasize);
-		*skip_reason = "skipped (too large address)";
-		return true;
+		return MEM_ACCESS_SKIPPED_TOO_LARGE_ADDRESS;
 	}
 	if (is_read && increment != size && (get_field(info->sbcs, DM_SBCS_SBVERSION) == 0 || increment != 0)) {
 		LOG_TARGET_DEBUG(target, "Skipping mem read via system bus - "
 				"sba reads only support size==increment or also size==0 for sba v1.");
-		*skip_reason = "skipped (unsupported increment)";
-		return true;
+		return MEM_ACCESS_SKIPPED_UNSUPPORTED_INCREMENT_SIZE;
 	}
 
-	return false;
+	return MEM_ACCESS_OK;
 }
 
-static bool mem_should_skip_abstract(struct target *target, target_addr_t address,
-		uint32_t size, uint32_t increment, bool is_read, char **skip_reason)
+static mem_access_result_t
+mem_should_skip_abstract(struct target *target, target_addr_t address,
+	uint32_t size, uint32_t increment, bool is_read)
 {
-	assert(skip_reason);
-
 	if (size > 8) {
 		/* TODO: Add 128b support if it's ever used. Involves modifying
 				 read/write_abstract_arg() to work on two 64b values. */
 		LOG_TARGET_DEBUG(target, "Skipping mem %s via abstract access - unsupported size: %d bits",
 				is_read ? "read" : "write", size * 8);
-		*skip_reason = "skipped (unsupported size)";
-		return true;
+		return MEM_ACCESS_SKIPPED_UNSUPPORTED_ACCESS_SIZE;
 	}
 	if ((sizeof(address) * 8 > riscv_xlen(target)) && (address >> riscv_xlen(target))) {
 		LOG_TARGET_DEBUG(target, "Skipping mem %s via abstract access - abstract access only supports %u-bit address.",
 				is_read ? "read" : "write", riscv_xlen(target));
-		*skip_reason = "skipped (too large address)";
-		return true;
+		return MEM_ACCESS_SKIPPED_TOO_LARGE_ADDRESS;
 	}
 	if (is_read && size != increment) {
 		LOG_TARGET_ERROR(target, "Skipping mem read via abstract access - "
 				"abstract command reads only support size==increment.");
-		*skip_reason = "skipped (unsupported increment)";
-		return true;
+		return MEM_ACCESS_SKIPPED_UNSUPPORTED_INCREMENT_SIZE;
 	}
-
-	return false;
+	return MEM_ACCESS_OK;
 }
 
 /*
@@ -3874,12 +3548,16 @@ static bool mem_should_skip_abstract(struct target *target, target_addr_t addres
  * supported are 1, 2, and 4 bytes despite the spec's support of 8 and 16 byte
  * aamsize fields in the memory access abstract command.
  */
-static int read_memory_abstract(struct target *target, target_addr_t address,
-		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
+static mem_access_result_t
+read_memory_abstract(struct target *target, target_addr_t address,
+	uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
 {
-	RISCV013_INFO(info);
+	mem_access_result_t skip_reason =
+		mem_should_skip_abstract(target, address, size, increment, /* is_read = */ true);
+	if (skip_reason != MEM_ACCESS_OK)
+		return skip_reason;
 
-	int result = ERROR_OK;
+	RISCV013_INFO(info);
 	bool use_aampostincrement = info->has_aampostincrement != YNM_NO;
 
 	LOG_TARGET_DEBUG(target, "Reading %d words of %d bytes from 0x%" TARGET_PRIxADDR, count,
@@ -3888,15 +3566,16 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 	memset(buffer, 0, count * size);
 
 	/* Convert the size (bytes) to width (bits) */
-	unsigned width = size << 3;
+	unsigned int width = size << 3;
 
 	/* Create the command (physical address, postincrement, read) */
 	uint32_t command = access_memory_command(target, false, width, use_aampostincrement, false);
 
 	/* Execute the reads */
 	uint8_t *p = buffer;
+	int result = ERROR_OK;
 	bool updateaddr = true;
-	unsigned int width32 = (width < 32) ? 32 : width;
+	unsigned int width32 = MAX(width, 32);
 	for (uint32_t c = 0; c < count; c++) {
 		/* Update the address if it is the first time or aampostincrement is not supported by the target. */
 		if (updateaddr) {
@@ -3904,13 +3583,13 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 			result = write_abstract_arg(target, 1, address + c * size, riscv_xlen(target));
 			if (result != ERROR_OK) {
 				LOG_TARGET_ERROR(target, "Failed to write arg1.");
-				return result;
+				return MEM_ACCESS_FAILED_DM_ACCESS_FAILED;
 			}
 		}
 
 		/* Execute the command */
 		uint32_t cmderr;
-		result = execute_abstract_command(target, command, &cmderr);
+		result = riscv013_execute_abstract_command(target, command, &cmderr);
 
 		/* TODO: we need to modify error handling here. */
 		/* NOTE: in case of timeout cmderr is set to CMDERR_NONE */
@@ -3920,7 +3599,7 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 				riscv_reg_t new_address;
 				result = read_abstract_arg(target, &new_address, 1, riscv_xlen(target));
 				if (result != ERROR_OK)
-					return result;
+					return MEM_ACCESS_FAILED_DM_ACCESS_FAILED;
 
 				if (new_address == address + size) {
 					LOG_TARGET_DEBUG(target, "aampostincrement is supported on this target.");
@@ -3932,7 +3611,7 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 			} else {
 				/* Try the same access but with postincrement disabled. */
 				command = access_memory_command(target, false, width, false, false);
-				result = execute_abstract_command(target, command, &cmderr);
+				result = riscv013_execute_abstract_command(target, command, &cmderr);
 				if (result == ERROR_OK) {
 					LOG_TARGET_DEBUG(target, "aampostincrement is not supported on this target.");
 					info->has_aampostincrement = YNM_NO;
@@ -3940,14 +3619,17 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 			}
 		}
 
+		/* TODO:
+		 * (1) Only the 1st access can result in a 'skip'
+		 * (2) Analyze cmderr value */
 		if (result != ERROR_OK)
-			return result;
+			return MEM_ACCESS_SKIPPED_ABSTRACT_ACCESS_CMDERR;
 
 		/* Copy arg0 to buffer (rounded width up to nearest 32) */
 		riscv_reg_t value;
 		result = read_abstract_arg(target, &value, 0, width32);
 		if (result != ERROR_OK)
-			return result;
+			return MEM_ACCESS_FAILED_DM_ACCESS_FAILED;
 		buf_set_u64(p, 0, 8 * size, value);
 
 		if (info->has_aampostincrement == YNM_YES)
@@ -3955,7 +3637,7 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 		p += size;
 	}
 
-	return result;
+	return MEM_ACCESS_OK;
 }
 
 /*
@@ -3963,9 +3645,16 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
  * sizes supported are 1, 2, and 4 bytes despite the spec's support of 8 and 16
  * byte aamsize fields in the memory access abstract command.
  */
-static int write_memory_abstract(struct target *target, target_addr_t address,
-		uint32_t size, uint32_t count, const uint8_t *buffer)
+static mem_access_result_t
+write_memory_abstract(struct target *target, target_addr_t address,
+	uint32_t size, uint32_t count, const uint8_t *buffer)
 {
+	mem_access_result_t skip_reason =
+		mem_should_skip_abstract(target, address, size,
+			/* increment = */ 0, /* is_read = */ false);
+	if (skip_reason != MEM_ACCESS_OK)
+		return skip_reason;
+
 	RISCV013_INFO(info);
 	int result = ERROR_OK;
 	bool use_aampostincrement = info->has_aampostincrement != YNM_NO;
@@ -3974,7 +3663,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 			  size, address);
 
 	/* Convert the size (bytes) to width (bits) */
-	unsigned width = size << 3;
+	unsigned int width = size << 3;
 
 	/* Create the command (physical address, postincrement, write) */
 	uint32_t command = access_memory_command(target, false, width, use_aampostincrement, true);
@@ -3988,7 +3677,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 		result = write_abstract_arg(target, 0, value, riscv_xlen(target));
 		if (result != ERROR_OK) {
 			LOG_TARGET_ERROR(target, "Failed to write arg0.");
-			return result;
+			return MEM_ACCESS_FAILED_DM_ACCESS_FAILED;
 		}
 
 		/* Update the address if it is the first time or aampostincrement is not supported by the target. */
@@ -3997,13 +3686,13 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 			result = write_abstract_arg(target, 1, address + c * size, riscv_xlen(target));
 			if (result != ERROR_OK) {
 				LOG_TARGET_ERROR(target, "Failed to write arg1.");
-				return result;
+				return MEM_ACCESS_FAILED_DM_ACCESS_FAILED;
 			}
 		}
 
 		/* Execute the command */
 		uint32_t cmderr;
-		result = execute_abstract_command(target, command, &cmderr);
+		result = riscv013_execute_abstract_command(target, command, &cmderr);
 
 		/* TODO: we need to modify error handling here. */
 		/* NOTE: in case of timeout cmderr is set to CMDERR_NONE */
@@ -4013,7 +3702,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 				riscv_reg_t new_address;
 				result = read_abstract_arg(target, &new_address, 1, riscv_xlen(target));
 				if (result != ERROR_OK)
-					return result;
+					return MEM_ACCESS_FAILED_DM_ACCESS_FAILED;
 
 				if (new_address == address + size) {
 					LOG_TARGET_DEBUG(target, "aampostincrement is supported on this target.");
@@ -4025,7 +3714,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 			} else {
 				/* Try the same access but with postincrement disabled. */
 				command = access_memory_command(target, false, width, false, true);
-				result = execute_abstract_command(target, command, &cmderr);
+				result = riscv013_execute_abstract_command(target, command, &cmderr);
 				if (result == ERROR_OK) {
 					LOG_TARGET_DEBUG(target, "aampostincrement is not supported on this target.");
 					info->has_aampostincrement = YNM_NO;
@@ -4033,15 +3722,18 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 			}
 		}
 
+		/* TODO:
+		 * (1) Only the 1st access can result in a 'skip'
+		 * (2) Analyze cmderr value */
 		if (result != ERROR_OK)
-			return result;
+			return MEM_ACCESS_SKIPPED_ABSTRACT_ACCESS_CMDERR;
 
 		if (info->has_aampostincrement == YNM_YES)
 			updateaddr = false;
 		p += size;
 	}
 
-	return result;
+	return MEM_ACCESS_OK;
 }
 
 /**
@@ -4071,11 +3763,11 @@ static int read_memory_progbuf_inner_startup(struct target *target,
 	/* AC_ACCESS_REGISTER_POSTEXEC is used to trigger first stage of the
 	 * pipeline (memory -> s1) whenever this command is executed.
 	 */
-	const uint32_t startup_command = access_register_command(target,
+	const uint32_t startup_command = riscv013_access_register_command(target,
 			GDB_REGNO_S1, riscv_xlen(target),
 			AC_ACCESS_REGISTER_TRANSFER | AC_ACCESS_REGISTER_POSTEXEC);
 	uint32_t cmderr;
-	if (execute_abstract_command(target, startup_command, &cmderr) != ERROR_OK)
+	if (riscv013_execute_abstract_command(target, startup_command, &cmderr) != ERROR_OK)
 		return ERROR_FAIL;
 	/* TODO: we need to modify error handling here. */
 	/* NOTE: in case of timeout cmderr is set to CMDERR_NONE */
@@ -4134,8 +3826,12 @@ static int read_memory_progbuf_inner_on_ac_busy(struct target *target,
 		uint32_t start_index, uint32_t *elements_read,
 		struct memory_access_info access)
 {
-	increase_ac_busy_delay(target);
-	riscv013_clear_abstract_error(target);
+	int res = riscv013_clear_abstract_error(target);
+	if (res != ERROR_OK)
+		return res;
+	res = increase_ac_busy_delay(target);
+	if (res != ERROR_OK)
+		return res;
 
 	if (dm_write(target, DM_ABSTRACTAUTO, 0) != ERROR_OK)
 		return ERROR_FAIL;
@@ -4439,11 +4135,11 @@ static int read_memory_progbuf_inner_fill_progbuf(struct target *target,
 {
 	const bool is_repeated_read = increment == 0;
 
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
-	if (riscv_save_register(target, GDB_REGNO_S1) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S1) != ERROR_OK)
 		return ERROR_FAIL;
-	if (is_repeated_read &&	riscv_save_register(target, GDB_REGNO_A0) != ERROR_OK)
+	if (is_repeated_read &&	riscv013_reg_save(target, GDB_REGNO_A0) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -4536,7 +4232,7 @@ static int read_memory_progbuf_inner(struct target *target,
 static int read_memory_progbuf_inner_one(struct target *target,
 		struct memory_access_info access, bool mprven)
 {
-	if (riscv_save_register(target, GDB_REGNO_S1) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S1) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -4554,11 +4250,11 @@ static int read_memory_progbuf_inner_one(struct target *target,
 	if (write_abstract_arg(target, 0, access.target_address, riscv_xlen(target))
 			!= ERROR_OK)
 		return ERROR_FAIL;
-	uint32_t command = access_register_command(target, GDB_REGNO_S1,
+	uint32_t command = riscv013_access_register_command(target, GDB_REGNO_S1,
 			riscv_xlen(target), AC_ACCESS_REGISTER_WRITE |
 			AC_ACCESS_REGISTER_TRANSFER | AC_ACCESS_REGISTER_POSTEXEC);
 	uint32_t cmderr;
-	if (execute_abstract_command(target, command, &cmderr) != ERROR_OK)
+	if (riscv013_execute_abstract_command(target, command, &cmderr) != ERROR_OK)
 		return ERROR_FAIL;
 
 	return read_word_from_s1(target, access, 0);
@@ -4567,34 +4263,35 @@ static int read_memory_progbuf_inner_one(struct target *target,
 /**
  * Read the requested memory, silently handling memory access errors.
  */
-static int read_memory_progbuf(struct target *target, target_addr_t address,
-		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
+static mem_access_result_t
+read_memory_progbuf(struct target *target, target_addr_t address,
+	uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
 {
-	if (riscv_xlen(target) < size * 8) {
-		LOG_TARGET_ERROR(target, "XLEN (%d) is too short for %"
-				PRIu32 "-bit memory read.", riscv_xlen(target), size * 8);
-		return ERROR_FAIL;
-	}
+	mem_access_result_t skip_reason =
+		mem_should_skip_progbuf(target, address, size, /* is_read = */ true);
+	if (skip_reason != MEM_ACCESS_OK)
+		return skip_reason;
 
 	LOG_TARGET_DEBUG(target, "reading %" PRIu32 " elements of %" PRIu32
 			" bytes from 0x%" TARGET_PRIxADDR, count, size, address);
 
 	if (dm013_select_target(target) != ERROR_OK)
-		return ERROR_FAIL;
+		return MEM_ACCESS_SKIPPED_TARGET_SELECT_FAILED;
 
 	select_dmi(target);
 
 	memset(buffer, 0, count*size);
 
 	if (execute_fence(target) != ERROR_OK)
-		return ERROR_FAIL;
+		return MEM_ACCESS_SKIPPED_FENCE_EXEC_FAILED;
 
 	uint64_t mstatus = 0;
 	uint64_t mstatus_old = 0;
 	if (modify_privilege(target, &mstatus, &mstatus_old) != ERROR_OK)
-		return ERROR_FAIL;
+		return MEM_ACCESS_FAILED_PRIV_MOD_FAILED;
 
-	const bool mprven = riscv_enable_virtual && get_field(mstatus, MSTATUS_MPRV);
+	const bool mprven = riscv_virt2phys_mode_is_hw(target)
+			&& get_field(mstatus, MSTATUS_MPRV);
 	const struct memory_access_info access = {
 		.target_address = address,
 		.increment = increment,
@@ -4607,9 +4304,32 @@ static int read_memory_progbuf(struct target *target, target_addr_t address,
 
 	if (mstatus != mstatus_old &&
 			register_write_direct(target, GDB_REGNO_MSTATUS, mstatus_old) != ERROR_OK)
-		return ERROR_FAIL;
+		return MEM_ACCESS_FAILED;
 
-	return result;
+	return (result == ERROR_OK) ? MEM_ACCESS_OK : MEM_ACCESS_FAILED;
+}
+
+static mem_access_result_t
+read_memory_sysbus(struct target *target, target_addr_t address,
+	uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
+{
+	mem_access_result_t skip_reason =
+		mem_should_skip_sysbus(target, address, size, increment, /* is_read = */ true);
+	if (skip_reason != MEM_ACCESS_OK)
+		return skip_reason;
+
+	int ret = ERROR_FAIL;
+	uint64_t sbver = get_field(get_info(target)->sbcs, DM_SBCS_SBVERSION);
+	if (sbver == 0) {
+		ret = read_memory_bus_v0(target, address, size, count, buffer, increment);
+	} else if (sbver == 1) {
+		ret = read_memory_bus_v1(target, address, size, count, buffer, increment);
+	} else {
+		LOG_TARGET_ERROR(target,
+			"Unknown system bus version: %" PRIu64, sbver);
+	}
+
+	return (ret == ERROR_OK) ? MEM_ACCESS_OK : MEM_ACCESS_FAILED;
 }
 
 static int read_memory(struct target *target, target_addr_t address,
@@ -4618,62 +4338,58 @@ static int read_memory(struct target *target, target_addr_t address,
 	if (count == 0)
 		return ERROR_OK;
 
-	if (size != 1 && size != 2 && size != 4 && size != 8 && size != 16) {
+	if (!IS_PWR_OF_2(size) || size < 1 || size > 16) {
 		LOG_TARGET_ERROR(target, "BUG: Unsupported size for memory read: %d", size);
 		return ERROR_FAIL;
 	}
 
-	int ret = ERROR_FAIL;
+	mem_access_result_t skip_reason[] = {
+		[RISCV_MEM_ACCESS_PROGBUF] = MEM_ACCESS_DISABLED,
+		[RISCV_MEM_ACCESS_SYSBUS] = MEM_ACCESS_DISABLED,
+		[RISCV_MEM_ACCESS_ABSTRACT] = MEM_ACCESS_DISABLED,
+	};
+
 	RISCV_INFO(r);
-	RISCV013_INFO(info);
+	for (unsigned int i = 0; i < r->num_enabled_mem_access_methods; ++i) {
+		riscv_mem_access_method_t method = r->mem_access_methods[i];
+		switch (method) {
+			case RISCV_MEM_ACCESS_PROGBUF:
+				skip_reason[method] =
+					read_memory_progbuf(target, address,
+						size, count, buffer, increment);
+				break;
+			case RISCV_MEM_ACCESS_SYSBUS:
+				skip_reason[method] =
+					read_memory_sysbus(target, address,
+						size, count, buffer, increment);
+				break;
+			case RISCV_MEM_ACCESS_ABSTRACT:
+				skip_reason[method] =
+					read_memory_abstract(target, address,
+						size, count, buffer, increment);
+				break;
+			default:
+				LOG_TARGET_ERROR(target, "Unknown memory access method: %d", method);
+				assert(false);
+				return ERROR_FAIL;
+		}
 
-	char *progbuf_result = "disabled";
-	char *sysbus_result = "disabled";
-	char *abstract_result = "disabled";
+		if (is_mem_access_failed(skip_reason[method]))
+			goto failure;
 
-	for (unsigned int i = 0; i < RISCV_NUM_MEM_ACCESS_METHODS; i++) {
-		int method = r->mem_access_methods[i];
-
-		if (method == RISCV_MEM_ACCESS_PROGBUF) {
-			if (mem_should_skip_progbuf(target, address, size, true, &progbuf_result))
-				continue;
-
-			ret = read_memory_progbuf(target, address, size, count, buffer, increment);
-
-			if (ret != ERROR_OK)
-				progbuf_result = "failed";
-		} else if (method == RISCV_MEM_ACCESS_SYSBUS) {
-			if (mem_should_skip_sysbus(target, address, size, increment, true, &sysbus_result))
-				continue;
-
-			if (get_field(info->sbcs, DM_SBCS_SBVERSION) == 0)
-				ret = read_memory_bus_v0(target, address, size, count, buffer, increment);
-			else if (get_field(info->sbcs, DM_SBCS_SBVERSION) == 1)
-				ret = read_memory_bus_v1(target, address, size, count, buffer, increment);
-
-			if (ret != ERROR_OK)
-				sysbus_result = "failed";
-		} else if (method == RISCV_MEM_ACCESS_ABSTRACT) {
-			if (mem_should_skip_abstract(target, address, size, increment, true, &abstract_result))
-				continue;
-
-			ret = read_memory_abstract(target, address, size, count, buffer, increment);
-
-			if (ret != ERROR_OK)
-				abstract_result = "failed";
-		} else if (method == RISCV_MEM_ACCESS_UNSPECIFIED)
-			/* No further mem access method to try. */
-			break;
-
-		log_mem_access_result(target, ret == ERROR_OK, method, true);
-
-		if (ret == ERROR_OK)
-			return ret;
+		const bool success = (skip_reason[method] == MEM_ACCESS_OK);
+		log_mem_access_result(target, success, method, /* is_read = */ true);
+		if (success)
+			return ERROR_OK;
 	}
 
-	LOG_TARGET_ERROR(target, "Failed to read memory (addr=0x%" PRIx64 ")", address);
-	LOG_TARGET_ERROR(target, "  progbuf=%s, sysbus=%s, abstract=%s", progbuf_result, sysbus_result, abstract_result);
-	return ret;
+failure:
+	LOG_TARGET_ERROR(target, "Failed to read memory (addr=0x%" PRIx64 ")\n"
+			"  progbuf=%s, sysbus=%s, abstract=%s", address,
+			mem_access_result_to_str(skip_reason[RISCV_MEM_ACCESS_PROGBUF]),
+			mem_access_result_to_str(skip_reason[RISCV_MEM_ACCESS_SYSBUS]),
+			mem_access_result_to_str(skip_reason[RISCV_MEM_ACCESS_ABSTRACT]));
+	return ERROR_FAIL;
 }
 
 static int write_memory_bus_v0(struct target *target, target_addr_t address,
@@ -4740,9 +4456,10 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 	target_addr_t next_address = address;
 	target_addr_t end_address = address + count * size;
 
-	int result;
+	int result = sb_write_address(target, next_address, RISCV_DELAY_BASE);
+	if (result != ERROR_OK)
+		return result;
 
-	sb_write_address(target, next_address, true);
 	while (next_address < end_address) {
 		LOG_TARGET_DEBUG(target, "Transferring burst starting at address 0x%" TARGET_PRIxADDR,
 				next_address);
@@ -4802,39 +4519,30 @@ static int write_memory_bus_v1(struct target *target, target_addr_t address,
 
 		/* Execute the batch of writes */
 		result = batch_run(target, batch);
-		riscv_batch_free(batch);
-		if (result != ERROR_OK)
+		if (result != ERROR_OK) {
+			riscv_batch_free(batch);
 			return result;
+		}
 
-		/* Read sbcs value.
-		 * At the same time, detect if DMI busy has occurred during the batch write. */
-		bool dmi_busy_encountered;
-		if (dm_op(target, &sbcs, &dmi_busy_encountered, DMI_OP_READ,
-				DM_SBCS, 0, false, true) != ERROR_OK)
-			return ERROR_FAIL;
+		bool dmi_busy_encountered = riscv_batch_was_batch_busy(batch);
+		riscv_batch_free(batch);
 		if (dmi_busy_encountered)
 			LOG_TARGET_DEBUG(target, "DMI busy encountered during system bus write.");
 
-		/* Wait until sbbusy goes low */
-		time_t start = time(NULL);
-		while (get_field(sbcs, DM_SBCS_SBBUSY)) {
-			if (time(NULL) - start > riscv_command_timeout_sec) {
-				LOG_TARGET_ERROR(target, "Timed out after %ds waiting for sbbusy to go low (sbcs=0x%x). "
-						  "Increase the timeout with riscv set_command_timeout_sec.",
-						  riscv_command_timeout_sec, sbcs);
-				return ERROR_FAIL;
-			}
-			if (dm_read(target, &sbcs, DM_SBCS) != ERROR_OK)
-				return ERROR_FAIL;
-		}
+		result = read_sbcs_nonbusy(target, &sbcs);
+		if (result != ERROR_OK)
+			return result;
 
 		if (get_field(sbcs, DM_SBCS_SBBUSYERROR)) {
 			/* We wrote while the target was busy. */
 			LOG_TARGET_DEBUG(target, "Sbbusyerror encountered during system bus write.");
 			/* Clear the sticky error flag. */
 			dm_write(target, DM_SBCS, sbcs | DM_SBCS_SBBUSYERROR);
-			/* Slow down before trying again. */
-			info->bus_master_write_delay += info->bus_master_write_delay / 10 + 1;
+			/* Slow down before trying again.
+			 * FIXME: Possible overflow is ignored here.
+			 */
+			riscv_scan_increase_delay(&info->learned_delays,
+					RISCV_DELAY_SYSBUS_WRITE);
 		}
 
 		if (get_field(sbcs, DM_SBCS_SBBUSYERROR) || dmi_busy_encountered) {
@@ -4905,14 +4613,14 @@ static int write_memory_progbuf_startup(struct target *target, target_addr_t *ad
 
 	/* Write and execute command that moves the value from data0 [, data1]
 	 * into S1 and executes program buffer. */
-	uint32_t command = access_register_command(target,
+	uint32_t command = riscv013_access_register_command(target,
 			GDB_REGNO_S1, riscv_xlen(target),
 			AC_ACCESS_REGISTER_POSTEXEC |
 			AC_ACCESS_REGISTER_TRANSFER |
 			AC_ACCESS_REGISTER_WRITE);
 
 	uint32_t cmderr;
-	if (execute_abstract_command(target, command, &cmderr) != ERROR_OK)
+	if (riscv013_execute_abstract_command(target, command, &cmderr) != ERROR_OK)
 		return ERROR_FAIL;
 
 	log_memory_access64(*address_p, value, size, /*is_read*/ false);
@@ -4945,8 +4653,12 @@ static int write_memory_progbuf_teardown(struct target *target)
 static int write_memory_progbuf_handle_busy(struct target *target,
 		target_addr_t *address_p, uint32_t size, const uint8_t *buffer)
 {
-	riscv013_clear_abstract_error(target);
-	increase_ac_busy_delay(target);
+	int res = riscv013_clear_abstract_error(target);
+	if (res != ERROR_OK)
+		return res;
+	res = increase_ac_busy_delay(target);
+	if (res != ERROR_OK)
+		return res;
 
 	if (write_memory_progbuf_teardown(target) != ERROR_OK)
 		return ERROR_FAIL;
@@ -5079,9 +4791,9 @@ static int riscv_program_store_mprv(struct riscv_program *p, enum gdb_regno d,
 static int write_memory_progbuf_fill_progbuf(struct target *target,
 		uint32_t size, bool mprven)
 {
-	if (riscv_save_register(target, GDB_REGNO_S0) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S0) != ERROR_OK)
 		return ERROR_FAIL;
-	if (riscv_save_register(target, GDB_REGNO_S1) != ERROR_OK)
+	if (riscv013_reg_save(target, GDB_REGNO_S1) != ERROR_OK)
 		return ERROR_FAIL;
 
 	struct riscv_program program;
@@ -5131,100 +4843,137 @@ static int write_memory_progbuf_inner(struct target *target, target_addr_t start
 	return write_memory_progbuf_teardown(target);
 }
 
-static int write_memory_progbuf(struct target *target, target_addr_t address,
+static mem_access_result_t
+write_memory_progbuf(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer)
 {
-	if (riscv_xlen(target) < size * 8) {
-		LOG_TARGET_ERROR(target, "XLEN (%u) is too short for %" PRIu32 "-bit memory write.",
-				riscv_xlen(target), size * 8);
-		return ERROR_FAIL;
-	}
+	mem_access_result_t skip_reason =
+		mem_should_skip_progbuf(target, address, size, /* is_read = */ false);
+	if (skip_reason != MEM_ACCESS_OK)
+		return skip_reason;
 
 	LOG_TARGET_DEBUG(target, "writing %" PRIu32 " words of %" PRIu32
 			" bytes to 0x%" TARGET_PRIxADDR, count, size, address);
 
 	if (dm013_select_target(target) != ERROR_OK)
-		return ERROR_FAIL;
+		return MEM_ACCESS_SKIPPED_TARGET_SELECT_FAILED;
 
 	uint64_t mstatus = 0;
 	uint64_t mstatus_old = 0;
 	if (modify_privilege(target, &mstatus, &mstatus_old) != ERROR_OK)
-		return ERROR_FAIL;
+		return MEM_ACCESS_FAILED_PRIV_MOD_FAILED;
 
-	const bool mprven = riscv_enable_virtual && get_field(mstatus, MSTATUS_MPRV);
+	const bool mprven = riscv_virt2phys_mode_is_hw(target)
+			&& get_field(mstatus, MSTATUS_MPRV);
 
 	int result = write_memory_progbuf_inner(target, address, size, count, buffer, mprven);
 
 	/* Restore MSTATUS */
 	if (mstatus != mstatus_old)
 		if (register_write_direct(target, GDB_REGNO_MSTATUS, mstatus_old))
-			return ERROR_FAIL;
+			return MEM_ACCESS_FAILED;
 
 	if (execute_fence(target) != ERROR_OK)
-		return ERROR_FAIL;
+		return MEM_ACCESS_SKIPPED_FENCE_EXEC_FAILED;
 
-	return result;
+	return result == ERROR_OK ? MEM_ACCESS_OK : MEM_ACCESS_FAILED;
+}
+
+static mem_access_result_t
+write_memory_sysbus(struct target *target, target_addr_t address,
+	uint32_t size, uint32_t count, const uint8_t *buffer)
+{
+	riscv013_info_t *info = get_info(target);
+	mem_access_result_t skip_reason =
+		mem_should_skip_sysbus(target, address, size, 0, /* is_read = */ false);
+	if (skip_reason != MEM_ACCESS_OK)
+		return skip_reason;
+
+	/* TODO: write_memory_bus_* should return mem_access_result_t too*/
+	int ret = ERROR_FAIL;
+	uint64_t sbver = get_field(info->sbcs, DM_SBCS_SBVERSION);
+	if (sbver == 0) {
+		ret = write_memory_bus_v0(target, address, size, count, buffer);
+	} else if (sbver == 1) {
+		ret = write_memory_bus_v1(target, address, size, count, buffer);
+	} else {
+		LOG_TARGET_ERROR(target,
+			"Unknown system bus version: %" PRIu64, sbver);
+	}
+
+	if (ret != ERROR_OK)
+		skip_reason = MEM_ACCESS_FAILED;
+
+	return skip_reason;
 }
 
 static int write_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer)
 {
-	if (size != 1 && size != 2 && size != 4 && size != 8 && size != 16) {
+	if (!IS_PWR_OF_2(size) || size < 1 || size > 16) {
 		LOG_TARGET_ERROR(target, "BUG: Unsupported size for memory write: %d", size);
 		return ERROR_FAIL;
 	}
 
-	int ret = ERROR_FAIL;
+	mem_access_result_t skip_reason[] = {
+		[RISCV_MEM_ACCESS_PROGBUF] = MEM_ACCESS_DISABLED,
+		[RISCV_MEM_ACCESS_SYSBUS] = MEM_ACCESS_DISABLED,
+		[RISCV_MEM_ACCESS_ABSTRACT] = MEM_ACCESS_DISABLED
+	};
+
 	RISCV_INFO(r);
-	RISCV013_INFO(info);
+	for (unsigned int i = 0; i < r->num_enabled_mem_access_methods; ++i) {
+		riscv_mem_access_method_t method = r->mem_access_methods[i];
+		switch (method) {
+			case RISCV_MEM_ACCESS_PROGBUF:
+				skip_reason[method] =
+					write_memory_progbuf(target, address,
+						size, count, buffer);
+				break;
+			case RISCV_MEM_ACCESS_SYSBUS:
+				skip_reason[method] =
+					write_memory_sysbus(target, address,
+						size, count, buffer);
+				break;
+			case RISCV_MEM_ACCESS_ABSTRACT:
+				skip_reason[method] =
+					write_memory_abstract(target, address,
+						size, count, buffer);
+				break;
+			default:
+				LOG_TARGET_ERROR(target, "Unknown memory access method: %d", method);
+				assert(false);
+				return ERROR_FAIL;
+		}
 
-	char *progbuf_result = "disabled";
-	char *sysbus_result = "disabled";
-	char *abstract_result = "disabled";
+		if (is_mem_access_failed(skip_reason[method]))
+			goto failure;
 
-	for (unsigned int i = 0; i < RISCV_NUM_MEM_ACCESS_METHODS; i++) {
-		int method = r->mem_access_methods[i];
-
-		if (method == RISCV_MEM_ACCESS_PROGBUF) {
-			if (mem_should_skip_progbuf(target, address, size, false, &progbuf_result))
-				continue;
-
-			ret = write_memory_progbuf(target, address, size, count, buffer);
-
-			if (ret != ERROR_OK)
-				progbuf_result = "failed";
-		} else if (method == RISCV_MEM_ACCESS_SYSBUS) {
-			if (mem_should_skip_sysbus(target, address, size, 0, false, &sysbus_result))
-				continue;
-
-			if (get_field(info->sbcs, DM_SBCS_SBVERSION) == 0)
-				ret = write_memory_bus_v0(target, address, size, count, buffer);
-			else if (get_field(info->sbcs, DM_SBCS_SBVERSION) == 1)
-				ret = write_memory_bus_v1(target, address, size, count, buffer);
-
-			if (ret != ERROR_OK)
-				sysbus_result = "failed";
-		} else if (method == RISCV_MEM_ACCESS_ABSTRACT) {
-			if (mem_should_skip_abstract(target, address, size, 0, false, &abstract_result))
-				continue;
-
-			ret = write_memory_abstract(target, address, size, count, buffer);
-
-			if (ret != ERROR_OK)
-				abstract_result = "failed";
-		} else if (method == RISCV_MEM_ACCESS_UNSPECIFIED)
-			/* No further mem access method to try. */
-			break;
-
-		log_mem_access_result(target, ret == ERROR_OK, method, false);
-
-		if (ret == ERROR_OK)
-			return ret;
+		const bool success = (skip_reason[method] == MEM_ACCESS_OK);
+		log_mem_access_result(target, success, method, /* is_read = */ false);
+		if (success)
+			return ERROR_OK;
 	}
 
-	LOG_TARGET_ERROR(target, "Target %s: Failed to write memory (addr=0x%" PRIx64 ")", target_name(target), address);
-	LOG_TARGET_ERROR(target, "  progbuf=%s, sysbus=%s, abstract=%s", progbuf_result, sysbus_result, abstract_result);
-	return ret;
+failure:
+	LOG_TARGET_ERROR(target, "Failed to write memory (addr=0x%" PRIx64 ")\n"
+			"progbuf=%s, sysbus=%s, abstract=%s", address,
+			mem_access_result_to_str(skip_reason[RISCV_MEM_ACCESS_PROGBUF]),
+			mem_access_result_to_str(skip_reason[RISCV_MEM_ACCESS_SYSBUS]),
+			mem_access_result_to_str(skip_reason[RISCV_MEM_ACCESS_ABSTRACT]));
+	return ERROR_FAIL;
+}
+
+static bool riscv013_get_impebreak(const struct target *target)
+{
+	RISCV013_INFO(r);
+	return r->impebreak;
+}
+
+static unsigned int riscv013_get_progbufsize(const struct target *target)
+{
+	RISCV013_INFO(r);
+	return r->progbufsize;
 }
 
 static int arch_state(struct target *target)
@@ -5252,7 +5001,7 @@ struct target_type riscv013_target = {
 };
 
 /*** 0.13-specific implementations of various RISC-V helper functions. ***/
-static int riscv013_get_register(struct target *target,
+int riscv013_get_register(struct target *target,
 		riscv_reg_t *value, enum gdb_regno rid)
 {
 	/* It would be beneficial to move this redirection to the
@@ -5261,14 +5010,14 @@ static int riscv013_get_register(struct target *target,
 	 */
 	if (rid == GDB_REGNO_PRIV) {
 		uint64_t dcsr;
-		if (riscv_get_register(target, &dcsr, GDB_REGNO_DCSR) != ERROR_OK)
+		if (riscv_reg_get(target, &dcsr, GDB_REGNO_DCSR) != ERROR_OK)
 			return ERROR_FAIL;
 		*value = set_field(0, VIRT_PRIV_V, get_field(dcsr, CSR_DCSR_V));
 		*value = set_field(*value, VIRT_PRIV_PRV, get_field(dcsr, CSR_DCSR_PRV));
 		return ERROR_OK;
 	}
 
-	LOG_TARGET_DEBUG(target, "reading register %s",	gdb_regno_name(target, rid));
+	LOG_TARGET_DEBUG(target, "reading register %s",	riscv_reg_gdb_regno_name(target, rid));
 
 	if (dm013_select_target(target) != ERROR_OK)
 		return ERROR_FAIL;
@@ -5281,11 +5030,11 @@ static int riscv013_get_register(struct target *target,
 	return ERROR_OK;
 }
 
-static int riscv013_set_register(struct target *target, enum gdb_regno rid,
+int riscv013_set_register(struct target *target, enum gdb_regno rid,
 		riscv_reg_t value)
 {
 	LOG_TARGET_DEBUG(target, "writing 0x%" PRIx64 " to register %s",
-			value, gdb_regno_name(target, rid));
+			value, riscv_reg_gdb_regno_name(target, rid));
 
 	if (dm013_select_target(target) != ERROR_OK)
 		return ERROR_FAIL;
@@ -5331,13 +5080,13 @@ static int select_prepped_harts(struct target *target)
 	}
 
 	assert(dm->hart_count);
-	unsigned hawindow_count = (dm->hart_count + 31) / 32;
+	unsigned int hawindow_count = (dm->hart_count + 31) / 32;
 	uint32_t *hawindow = calloc(hawindow_count, sizeof(uint32_t));
 	if (!hawindow)
 		return ERROR_FAIL;
 
 	target_list_t *entry;
-	unsigned total_selected = 0;
+	unsigned int total_selected = 0;
 	unsigned int selected_index = 0;
 	list_for_each_entry(entry, &dm->target_list, list) {
 		struct target *t = entry->target;
@@ -5369,7 +5118,7 @@ static int select_prepped_harts(struct target *target)
 		return ERROR_FAIL;
 	}
 
-	for (unsigned i = 0; i < hawindow_count; i++) {
+	for (unsigned int i = 0; i < hawindow_count; i++) {
 		if (dm_write(target, DM_HAWINDOWSEL, i) != ERROR_OK) {
 			free(hawindow);
 			return ERROR_FAIL;
@@ -5566,8 +5315,7 @@ static int riscv013_invalidate_cached_progbuf(struct target *target)
 	}
 
 	LOG_TARGET_DEBUG(target, "Invalidating progbuf cache");
-	for (unsigned int i = 0; i < 15; i++)
-		dm->progbuf_cache[i] = 0;
+	memset(dm->progbuf_cache, 0, sizeof(dm->progbuf_cache));
 	return ERROR_OK;
 }
 
@@ -5579,7 +5327,7 @@ static int riscv013_execute_progbuf(struct target *target, uint32_t *cmderr)
 	run_program = set_field(run_program, AC_ACCESS_REGISTER_TRANSFER, 0);
 	run_program = set_field(run_program, AC_ACCESS_REGISTER_REGNO, 0x1000);
 
-	return execute_abstract_command(target, run_program, cmderr);
+	return riscv013_execute_abstract_command(target, run_program, cmderr);
 }
 
 static void riscv013_fill_dmi_write(struct target *target, char *buf, uint64_t a, uint32_t d)
@@ -5598,7 +5346,7 @@ static void riscv013_fill_dmi_read(struct target *target, char *buf, uint64_t a)
 	buf_set_u64((unsigned char *)buf, DTM_DMI_ADDRESS_OFFSET, info->abits, a);
 }
 
-static void riscv013_fill_dmi_nop(struct target *target, char *buf)
+static void riscv013_fill_dm_nop(struct target *target, char *buf)
 {
 	RISCV013_INFO(info);
 	buf_set_u64((unsigned char *)buf, DTM_DMI_OP_OFFSET, DTM_DMI_OP_LENGTH, DMI_OP_NOP);
@@ -5610,27 +5358,6 @@ static int riscv013_get_dmi_scan_length(struct target *target)
 {
 	RISCV013_INFO(info);
 	return info->abits + DTM_DMI_DATA_LENGTH + DTM_DMI_OP_LENGTH;
-}
-
-void riscv013_fill_dm_write(struct target *target, char *buf, uint64_t a, uint32_t d)
-{
-	dm013_info_t *dm = get_dm(target);
-	if (!dm)
-		return;
-	riscv013_fill_dmi_write(target, buf, a + dm->base, d);
-}
-
-void riscv013_fill_dm_read(struct target *target, char *buf, uint64_t a)
-{
-	dm013_info_t *dm = get_dm(target);
-	if (!dm)
-		return;
-	riscv013_fill_dmi_read(target, buf, a + dm->base);
-}
-
-void riscv013_fill_dm_nop(struct target *target, char *buf)
-{
-	riscv013_fill_dmi_nop(target, buf);
 }
 
 static int maybe_execute_fence_i(struct target *target)
@@ -5649,7 +5376,7 @@ static int riscv013_on_step_or_resume(struct target *target, bool step)
 	if (set_dcsr_ebreak(target, step) != ERROR_OK)
 		return ERROR_FAIL;
 
-	if (riscv_flush_registers(target) != ERROR_OK)
+	if (riscv_reg_flush_all(target) != ERROR_OK)
 		return ERROR_FAIL;
 	return ERROR_OK;
 }
@@ -5663,7 +5390,7 @@ static int riscv013_step_or_resume_current_hart(struct target *target,
 	}
 	LOG_TARGET_DEBUG(target, "resuming (for step?=%d)", step);
 
-	if (riscv_flush_registers(target) != ERROR_OK)
+	if (riscv_reg_flush_all(target) != ERROR_OK)
 		return ERROR_FAIL;
 
 	dm013_info_t *dm = get_dm(target);

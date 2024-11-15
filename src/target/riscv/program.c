@@ -30,7 +30,7 @@ int riscv_program_init(struct riscv_program *p, struct target *target)
 
 int riscv_program_write(struct riscv_program *program)
 {
-	for (unsigned i = 0; i < program->instruction_count; ++i) {
+	for (unsigned int i = 0; i < program->instruction_count; ++i) {
 		LOG_TARGET_DEBUG(program->target, "progbuf[%02x] = DASM(0x%08x)",
 				i, program->progbuf[i]);
 		if (riscv_write_progbuf(program->target, i, program->progbuf[i]) != ERROR_OK)
@@ -183,8 +183,8 @@ int riscv_program_ebreak(struct riscv_program *p)
 {
 	struct target *target = p->target;
 	RISCV_INFO(r);
-	if (p->instruction_count == riscv_progbuf_size(p->target) &&
-			r->impebreak) {
+	if (p->instruction_count == riscv_progbuf_size(target) &&
+			r->get_impebreak(target)) {
 		return ERROR_OK;
 	}
 	return riscv_program_insert(p, ebreak());

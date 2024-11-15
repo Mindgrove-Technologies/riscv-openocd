@@ -517,6 +517,15 @@ DECLARE_PARSE_WRAPPER(_target_addr, target_addr_t);
 int command_parse_bool_arg(const char *in, bool *out);
 COMMAND_HELPER(handle_command_parse_bool, bool *out, const char *label);
 
+/**
+ * Parse a number (base 10, base 16 or base 8) and store the result
+ * into a bit buffer. Use the prefixes '0' and '0x' for base 8 and 16,
+ * otherwise defaults to base 10.
+ *
+ * In case of parsing error, a user-readable error message is produced.
+ */
+COMMAND_HELPER(command_parse_str_to_buf, const char *str, void *buf, unsigned int buf_len);
+
 /** parses an on/off command argument */
 #define COMMAND_PARSE_ON_OFF(in, out) \
 	COMMAND_PARSE_BOOL(in, out, "on", "off")
