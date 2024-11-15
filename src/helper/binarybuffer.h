@@ -20,6 +20,31 @@
 
 /**
  * Sets @c num bits in @c _buffer, starting at the @c first bit,
+ * using the bits in @c value. This routine fast-paths writes
+ * of little-endian, byte-aligned, 16-bit words.
+ * @param _buffer The buffer whose bits will be set.
+ *	Do not use uninitialized buffer or clang static analyzer emits a warning.
+ * @param first The bit offset in @c _buffer to start writing (0-15).
+ * @param num The number of bits from @c value to copy (1-16).
+ * @param value Up to 16 bits that will be copied to _buffer.
+ */
+static inline void buf_set_u16(uint8_t *_buffer,
+	unsigned first, unsigned num, uint16_t value)
+{
+	uint8_t *buffer = (uint8_t *)_buffer;
+
+	if ((num <= 16) && (first <= 15)) {
+		for (unsigned i = first; i < first + num; i++) {
+			if (((value >> (i - first)) & 1) == 1)
+				buffer[i / 8] |= 1 << (i % 8);
+			else
+				buffer[i / 8] &= ~(1 << (i % 8));
+		}
+	}
+}
+
+/**
+ * Sets @c num bits in @c _buffer, starting at the @c first bit,
  * using the bits in @c value.  This routine fast-paths writes
  * of little-endian, byte-aligned, 32-bit words.
  * @param _buffer The buffer whose bits will be set.

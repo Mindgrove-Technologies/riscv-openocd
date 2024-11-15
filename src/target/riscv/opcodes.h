@@ -215,6 +215,19 @@ static uint32_t fmv_d_x(unsigned dest, unsigned src)
 	return inst_rs1(src) | inst_rd(dest) | MATCH_FMV_D_X;
 }
 
+
+static uint64_t ebreak_cd(void) __attribute__ ((unused));
+static uint64_t ebreak_cd(void)
+{
+	return MATCH_EBREAK_CD;
+}
+
+static uint64_t ebreak_d(void) __attribute__ ((unused));
+static uint64_t ebreak_d(void)
+{
+	return MATCH_EBREAK_D;
+}
+
 static uint32_t ebreak(void) __attribute__ ((unused));
 static uint32_t ebreak(void)
 {
