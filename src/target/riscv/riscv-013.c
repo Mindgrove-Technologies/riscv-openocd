@@ -190,6 +190,9 @@ typedef struct {
 	uint8_t dataaccess;
 	int16_t dataaddr;
 
+	/* The width of the hartsel field. */
+	unsigned int hartsellen;
+
 	/* DM that provides access to this target. */
 	dm013_info_t *dm;
 
@@ -2600,7 +2603,7 @@ static int sample_memory_bus_v1(struct target *target,
 		/* Discard the batch when we encounter a busy state on the DMI level.
 		 * It's too much hassle to try to recover partial data. We'll try again
 		 * with a larger DMI delay. */
-		unsigned int sbcs_read_op = riscv_batch_get_dmi_read_op(batch, sbcs_read_index);
+		const uint32_t sbcs_read_op = riscv_batch_get_dmi_read_op(batch, sbcs_read_index);
 		if (sbcs_read_op == DTM_DMI_OP_BUSY) {
 			result = increase_dmi_busy_delay(target);
 			if (result != ERROR_OK) {
@@ -2922,10 +2925,14 @@ static int deassert_reset(struct target *target)
 	return ERROR_OK;
 }
 
-static int execute_fence(struct target *target)
+static int execute_autofence(struct target *target)
 {
 	if (dm013_select_target(target) != ERROR_OK)
 		return ERROR_FAIL;
+
+	RISCV_INFO(r);
+	if (!r->autofence)
+		return ERROR_OK;
 
 	/* FIXME: For non-coherent systems we need to flush the caches right
 	 * here, but there's no ISA-defined way of doing that. */
@@ -2948,8 +2955,9 @@ static int execute_fence(struct target *target)
 				LOG_TARGET_ERROR(target, "Unexpected error during fence execution");
 				return ERROR_FAIL;
 			}
-			LOG_TARGET_DEBUG(target, "Unable to execute fence");
+			LOG_TARGET_DEBUG(target, "Unable to execute fence.i and fence rw, rw");
 		}
+		LOG_TARGET_DEBUG(target, "Successfully executed fence.i and fence rw, rw");
 		return ERROR_OK;
 	}
 
@@ -2963,6 +2971,7 @@ static int execute_fence(struct target *target)
 			}
 			LOG_TARGET_DEBUG(target, "Unable to execute fence.i");
 		}
+		LOG_TARGET_DEBUG(target, "Successfully executed fence.i");
 
 		riscv_program_init(&program, target);
 		riscv_program_fence_rw_rw(&program);
@@ -2973,6 +2982,7 @@ static int execute_fence(struct target *target)
 			}
 			LOG_TARGET_DEBUG(target, "Unable to execute fence rw, rw");
 		}
+		LOG_TARGET_DEBUG(target, "Successfully executed fence rw, rw");
 		return ERROR_OK;
 	}
 
@@ -3082,36 +3092,48 @@ static int read_sbcs_nonbusy(struct target *target, uint32_t *sbcs)
 	}
 }
 
+/* TODO: return mem_access_result_t */
 static int modify_privilege(struct target *target, uint64_t *mstatus, uint64_t *mstatus_old)
 {
-	if (riscv_virt2phys_mode_is_hw(target)
-			&& has_sufficient_progbuf(target, 5)) {
-		/* Read DCSR */
-		uint64_t dcsr;
-		if (register_read_direct(target, &dcsr, GDB_REGNO_DCSR) != ERROR_OK)
-			return ERROR_FAIL;
+	assert(mstatus);
+	assert(mstatus_old);
+	if (!riscv_virt2phys_mode_is_hw(target))
+		return ERROR_OK;
 
-		/* Read and save MSTATUS */
-		if (register_read_direct(target, mstatus, GDB_REGNO_MSTATUS) != ERROR_OK)
-			return ERROR_FAIL;
-		*mstatus_old = *mstatus;
-
-		/* If we come from m-mode with mprv set, we want to keep mpp */
-		if (get_field(dcsr, CSR_DCSR_PRV) < 3) {
-			/* MPP = PRIV */
-			*mstatus = set_field(*mstatus, MSTATUS_MPP, get_field(dcsr, CSR_DCSR_PRV));
-
-			/* MPRV = 1 */
-			*mstatus = set_field(*mstatus, MSTATUS_MPRV, 1);
-
-			/* Write MSTATUS */
-			if (*mstatus != *mstatus_old)
-				if (register_write_direct(target, GDB_REGNO_MSTATUS, *mstatus) != ERROR_OK)
-					return ERROR_FAIL;
-		}
+	/* TODO: handle error in this case
+	 * modify_privilege function used only for program buffer memory access.
+	 * Privilege modification requires progbuf size to be at least 5 */
+	if (!has_sufficient_progbuf(target, 5)) {
+		LOG_TARGET_WARNING(target, "Can't modify privilege to provide "
+				"hardware translation: program buffer too small.");
+		return ERROR_OK;
 	}
 
-	return ERROR_OK;
+	/* Read DCSR */
+	riscv_reg_t dcsr;
+	if (register_read_direct(target, &dcsr, GDB_REGNO_DCSR) != ERROR_OK)
+		return ERROR_FAIL;
+
+	/* Read and save MSTATUS */
+	if (register_read_direct(target, mstatus, GDB_REGNO_MSTATUS) != ERROR_OK)
+		return ERROR_FAIL;
+	*mstatus_old = *mstatus;
+
+	/* If we come from m-mode with mprv set, we want to keep mpp */
+	if (get_field(dcsr, CSR_DCSR_PRV) == PRV_M)
+		return ERROR_OK;
+
+	/* mstatus.mpp <- dcsr.prv */
+	*mstatus = set_field(*mstatus, MSTATUS_MPP, get_field(dcsr, CSR_DCSR_PRV));
+
+	/* mstatus.mprv <- 1 */
+	*mstatus = set_field(*mstatus, MSTATUS_MPRV, 1);
+
+	/* Write MSTATUS */
+	if (*mstatus == *mstatus_old)
+		return ERROR_OK;
+
+	return register_write_direct(target, GDB_REGNO_MSTATUS, *mstatus);
 }
 
 static int read_memory_bus_v0(struct target *target, target_addr_t address,
@@ -3417,26 +3439,32 @@ bool is_mem_access_failed(mem_access_result_t status)
 {
 	#define MEM_ACCESS_RESULT_HANDLER(name, kind, msg) \
 		case name: return kind == MEM_ACCESS_RESULT_TYPE_FAILED;
+
 	switch (status) {
 		LIST_OF_MEM_ACCESS_RESULTS
 	}
+
 	#undef MEM_ACCESS_RESULT_HANDLER
+
 	LOG_ERROR("Unknown memory access status: %d", status);
-	assert(false);
-	return false;
+	assert(false && "Unknown memory access status");
+	return true;
 }
 
 bool is_mem_access_skipped(mem_access_result_t status)
 {
 	#define MEM_ACCESS_RESULT_HANDLER(name, kind, msg) \
 		case name: return kind == MEM_ACCESS_RESULT_TYPE_SKIPPED;
+
 	switch (status) {
 		LIST_OF_MEM_ACCESS_RESULTS
 	}
+
 	#undef MEM_ACCESS_RESULT_HANDLER
+
 	LOG_ERROR("Unknown memory access status: %d", status);
-	assert(false);
-	return false;
+	assert(false && "Unknown memory access status");
+	return true;
 }
 
 const char *mem_access_result_to_str(mem_access_result_t status)
@@ -4282,7 +4310,7 @@ read_memory_progbuf(struct target *target, target_addr_t address,
 
 	memset(buffer, 0, count*size);
 
-	if (execute_fence(target) != ERROR_OK)
+	if (execute_autofence(target) != ERROR_OK)
 		return MEM_ACCESS_SKIPPED_FENCE_EXEC_FAILED;
 
 	uint64_t mstatus = 0;
@@ -4873,7 +4901,7 @@ write_memory_progbuf(struct target *target, target_addr_t address,
 		if (register_write_direct(target, GDB_REGNO_MSTATUS, mstatus_old))
 			return MEM_ACCESS_FAILED;
 
-	if (execute_fence(target) != ERROR_OK)
+	if (execute_autofence(target) != ERROR_OK)
 		return MEM_ACCESS_SKIPPED_FENCE_EXEC_FAILED;
 
 	return result == ERROR_OK ? MEM_ACCESS_OK : MEM_ACCESS_FAILED;
@@ -5360,18 +5388,12 @@ static int riscv013_get_dmi_scan_length(struct target *target)
 	return info->abits + DTM_DMI_DATA_LENGTH + DTM_DMI_OP_LENGTH;
 }
 
-static int maybe_execute_fence_i(struct target *target)
-{
-	if (has_sufficient_progbuf(target, 2))
-		return execute_fence(target);
-	return ERROR_OK;
-}
-
 /* Helper Functions. */
 static int riscv013_on_step_or_resume(struct target *target, bool step)
 {
-	if (maybe_execute_fence_i(target) != ERROR_OK)
-		return ERROR_FAIL;
+	if (has_sufficient_progbuf(target, 2))
+		if (execute_autofence(target) != ERROR_OK)
+			return ERROR_FAIL;
 
 	if (set_dcsr_ebreak(target, step) != ERROR_OK)
 		return ERROR_FAIL;
@@ -5388,7 +5410,9 @@ static int riscv013_step_or_resume_current_hart(struct target *target,
 		LOG_TARGET_ERROR(target, "Hart is not halted!");
 		return ERROR_FAIL;
 	}
-	LOG_TARGET_DEBUG(target, "resuming (for step?=%d)", step);
+
+	LOG_TARGET_DEBUG(target, "resuming (operation=%s)",
+		step ? "single-step" : "resume");
 
 	if (riscv_reg_flush_all(target) != ERROR_OK)
 		return ERROR_FAIL;
@@ -5421,16 +5445,26 @@ static int riscv013_step_or_resume_current_hart(struct target *target,
 		return ERROR_OK;
 	}
 
-	dm_write(target, DM_DMCONTROL, dmcontrol);
+	LOG_TARGET_ERROR(target, "Failed to %s. dmstatus=0x%08x",
+		step ? "single-step" : "resume", dmstatus);
 
-	LOG_TARGET_ERROR(target, "unable to resume");
+	dm_write(target, DM_DMCONTROL, dmcontrol);
+	LOG_TARGET_ERROR(target,
+		"  cancelling the resume request (dmcontrol.resumereq <- 0)");
+
 	if (dmstatus_read(target, &dmstatus, true) != ERROR_OK)
 		return ERROR_FAIL;
-	LOG_TARGET_ERROR(target, "  dmstatus=0x%08x", dmstatus);
+
+	LOG_TARGET_ERROR(target, "  dmstatus after cancellation=0x%08x", dmstatus);
 
 	if (step) {
-		LOG_TARGET_ERROR(target, "  was stepping, halting");
-		riscv_halt(target);
+		LOG_TARGET_ERROR(target,
+			"  trying to recover from a failed single-step, by requesting halt");
+		if (riscv_halt(target) == ERROR_OK)
+			LOG_TARGET_ERROR(target, "  halt completed after failed single-step");
+		else
+			LOG_TARGET_ERROR(target, "  could not halt, something is wrong with the taget");
+		// TODO: returning ERROR_OK is questionable, this code needs to be revised
 		return ERROR_OK;
 	}
 
