@@ -17,6 +17,9 @@ noinst_LTLIBRARIES += %D%/libriscv.la
        %D%/riscv-011_reg.h \
        %D%/riscv-013.h \
        %D%/riscv-013_reg.h \
+       %D%/secure_iot_qspi.h \
+       %D%/secure_iot_psram.h \
+       %D%/secure_iot_common.h \
        %D%/batch.c \
        %D%/program.c \
        %D%/riscv-011.c \
@@ -27,6 +30,10 @@ noinst_LTLIBRARIES += %D%/libriscv.la
        %D%/riscv_reg.c \
        %D%/riscv_semihosting.c \
        %D%/debug_defines.c \
-       %D%/debug_reg_printer.c
+       %D%/debug_reg_printer.c \
+       %D%/secure_iot_qspi.c \
+       %D%/secure_iot_psram_driver.c \
+       %D%/secure_iot.c 
+
 
 STARTUP_TCL_SRCS += %D%/startup.tcl

@@ -1,9 +1,6 @@
 #include "secure_iot_qspi.h"
 #include <helper/log.h>
-// #define DBG_PRINT(...) LOG_INFO(__VA_ARGS__)
-// or use printf if needed
 
-#define WAIT_TIMEOUT 1000000
 uint32_t QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_msg *msg)
 {
   if (instance_number > 1)
@@ -20,8 +17,14 @@ uint32_t QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_
   uint32_t ar_address = qspi_base + 0x18;
   uint32_t abr_address = qspi_base + 0x1c;
   uint32_t dr_address = qspi_base + 0x20;
+  uint32_t rmc_address = qspi_base + 0x38;
 
-  target_write_u32(target, cr_address, (CR_PRESCALER(msg->PRESCALER) | CR_PMM(msg->PMM) | CR_APMS(msg->APMS) | CR_TOIE(msg->TOIE) | CR_SMIE(msg->SMIE) | CR_FTIE(msg->FTIE) | CR_TCIE(msg->TCIE) | CR_TEIE(msg->TEIE) | CR_TCEN(msg->TOIE) | CR_EN(1)));
+
+  target_write_u32(target, cr_address, (CR_PRESCALER(msg->PRESCALER) \
+  | CR_PMM(msg->PMM) | CR_APMS(msg->APMS) | \
+  CR_TOIE(msg->TOIE) | CR_SMIE(msg->SMIE) | CR_FTIE(msg->FTIE) \
+  | CR_TCIE(msg->TCIE) | CR_TEIE(msg->TEIE) | CR_TCEN(msg->TOIE) | CR_EN(1)));
+
   uint32_t cr_value;
   target_read_u32(target, cr_address, &cr_value);
   cr_value &= ~CR_FTHRES(15);
@@ -43,6 +46,16 @@ uint32_t QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_
   target_write_u32(target, ccr_address, temp);
   target_write_u32(target, ar_address, msg->address);
   target_write_u32(target, abr_address, msg->alternate_byte);
+
+    if ((msg->functional_mode == CCR_FMODE_MMM) && (msg->mm_mode == CCR_MM_MODE_RAM))
+    {
+        temp = RMC_WDCYC(msg->wr_dcyc) |
+                                    RMC_RDCYC(msg->rd_dcyc) | RMC_WINSTR(msg->wr_instr) |
+                                    RMC_RINSTR(msg->rd_instr);
+        target_write_u32(target, rmc_address, temp);
+          uint32_t temp1;
+        target_read_u32(target, rmc_address, &temp1);       
+    }
 
   uint8_t i = 0;
   uint32_t status_reg;

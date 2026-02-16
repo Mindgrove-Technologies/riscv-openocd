@@ -5,9 +5,8 @@
 #include "imp.h"
 #include<elf.h>
 #include <helper/log.h>
-// #define DBG_PRINT(...) LOG_INFO(__VA_ARGS__)
-// or use printf if needed
 #include"secure_iot_flash_driver.h"
+
 #define CHUNK_SIZE 128
 qspi_msg flash_msg={.PRESCALER=6,.CLK_MODE=0,.FMEM_SIZE = 27,.FTIE = 0,.TCEN=0,.TEIE=0,.TOIE=0,.SMIE = 0,.APMS= 0,.PMM=0};
 
@@ -834,7 +833,7 @@ uint32_t psram_init(struct target *target,uint8_t qspinum, int ram_size,uint8_t 
     flash_msg.fthresh = fthresh;
     return QSPI_Transaction(target,qspinum,&flash_msg);
 }
-COMMAND_HANDLER(handle_flash_write)
+int handle_flash_write(struct command_invocation *cmd)
 {
 /*
  * argv[1] = QSPI number
@@ -953,7 +952,7 @@ for (int l = 0; l < elf_header.e_phnum; l++) {
                writeDisable(target,qspi_number);/*Enable write operation*/
             }
             size_t offset = 0x000;
-            // DBG_PRINT("remaining bytes=%zu",remaining_bytes);
+            
             while (remaining_bytes > 0) {
                to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
                bytesReadInChunk = fread(buffer, 1, to_read, file);
@@ -965,7 +964,7 @@ for (int l = 0; l < elf_header.e_phnum; l++) {
                if(((mask_address+offset)&(~(0xFF))) == (((mask_address+offset)+bytesReadInChunk-1)&(~(0xFF)))){//check if start address and end address in same sector
                 writeEnable(target,qspi_number);/*Enable write operation*/
                 inputpageQuad(target,qspi_number,buffer,mask_address+offset,bytesReadInChunk);/*To write data to flash*/
-                // DBG_PRINT("addr in flash driver = 0x%zx",mask_address+offset);
+                
 
                 writeDisable(target,qspi_number);/*Enable write operation*/
             }
@@ -1015,13 +1014,13 @@ fclose(file);
    while (remaining_bytes > 0) {
       to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
       bytesReadInChunk = fread(buffer, 1, to_read, file);
-        // DBG_PRINT("1");
+        
       writeEnable(target,qspi_number);/*Enable write operation*/
-        // DBG_PRINT("2, addr %lx",mask_address+offset);
+        
       inputpageQuad(target,qspi_number,buffer,mask_address+offset,bytesReadInChunk);/*To write data to flash*/
-        // DBG_PRINT("3");
+        
     //   writeDisable(target,qspi_number);/*Enable write operation*/
-        // DBG_PRINT("4");
+        
 
       log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",start_address+offset);
       for(uint8_t i = 0;i<16;i++){
@@ -1042,7 +1041,7 @@ return ERROR_OK;
 
 
 
-COMMAND_HANDLER(handle_flash_write_length)
+int handle_flash_write_length(struct command_invocation *cmd)
 {
 /*
  * argv[1] = QSPI number
@@ -1143,7 +1142,7 @@ return ERROR_OK;
 }
 
 
-COMMAND_HANDLER(handle_flash_write_data)
+int handle_flash_write_data(struct command_invocation *cmd)
 {
 /*
  * argv[1] = address
@@ -1186,20 +1185,7 @@ COMMAND_HANDLER(handle_flash_write_data)
 return ERROR_OK;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-COMMAND_HANDLER(handle_sector_erase)
+int handle_sector_erase(struct command_invocation *cmd)
 {
 /*
  * argv[1] = QSPI number
@@ -1233,7 +1219,7 @@ for(uint32_t s = erase_start_address,i=0;i<no_of_sectors;s+=increment,i++){
 return 0;
 }
 
-COMMAND_HANDLER(handle_reset)
+int handle_reset(struct command_invocation *cmd)
 {
 struct target *target = get_current_target(CMD_CTX);
 target_write_u32(target,0x40408,3);
@@ -1242,7 +1228,7 @@ return 0;
 }
 
 
-COMMAND_HANDLER(handle_flash_erase)
+int handle_flash_erase(struct command_invocation *cmd)
 {
 /*
  * argv[1] = QSPI number
@@ -1272,7 +1258,7 @@ command_print(CMD, "Chip Erase Complete!");
 return ERROR_OK;
 }
 
-COMMAND_HANDLER(handle_flash_xip)
+int handle_flash_xip(struct command_invocation *cmd)
 {
 /*
  * argv[1] = QSPI number
@@ -1285,70 +1271,9 @@ command_print(CMD, "Flash xip is configured with qspi %x",qspi_number);
 flash_xip_init(target,qspi_number,27);
 return ERROR_OK;
 }
-static const struct command_registration secureiot_exec_command_handlers[] = {
-    {
-        .name = "flash_erase",
-        .mode = COMMAND_EXEC,
-        .handler = handle_flash_erase,
-        .help = "Flash erase command",
-        .usage = "fec",
-    },
-    {
-       .name = "flash_write",
-       .mode = COMMAND_EXEC,
-       .handler = handle_flash_write,
-       .help = "Flash write command",
-       .usage = "fwc",
-   },
-    {
-       .name = "flash_xip_init",
-       .mode = COMMAND_EXEC,
-       .handler = handle_flash_xip,
-       .help = "Flash xip command",
-       .usage = "fxc",
-   },
-   {
-       .name = "flash_sector_erase",
-       .mode = COMMAND_EXEC,
-       .handler = handle_sector_erase,
-       .help = "Flash xip command",
-       .usage = "fsec",
-   },
-   {
-       .name = "reset",
-       .mode = COMMAND_EXEC,
-       .handler = handle_reset,
-       .help = "reset command",
-       .usage = "fsec",
-   },
-   {
-        .name = "flash_write_length",
-        .mode = COMMAND_EXEC,
-        .handler = handle_flash_write_length,
-        .help = "reset command",
-        .usage = "fsec",
-   },    
-      {
-        .name = "flash_write_data",
-        .mode = COMMAND_EXEC,
-        .handler = handle_flash_write_data,
-        .help = "reset command",
-        .usage = "fsec",
-   },    
-	COMMAND_REGISTRATION_DONE
-};
+ 
 
-static const struct command_registration secureiot_command_handlers[] = {
-	{
-		.name = "secureiot",
-		.mode = COMMAND_ANY,
-		.help = "secureiot flash command group",
-		.usage = "Summa print",
-		.chain = secureiot_exec_command_handlers,
-	},
-	COMMAND_REGISTRATION_DONE
-};
-FLASH_BANK_COMMAND_HANDLER(secureiot_flash_bank_command)
+FLASH_BANK_COMMAND_HANDLER (secureiot_flash_bank_command)
 {
 
 
@@ -1403,7 +1328,7 @@ static int get_secure_iot_info(struct flash_bank *bank, struct command_invocatio
 }
 const struct flash_driver secureiot_flash = {
 	.name = "secureiot",
-	.commands = secureiot_command_handlers,
+	.commands = NULL,
 	.flash_bank_command = secureiot_flash_bank_command,
 	.erase = secure_iot_erase,
 	.protect = secure_iot_protect,

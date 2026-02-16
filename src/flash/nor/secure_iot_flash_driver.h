@@ -18,7 +18,9 @@
  * @copyright Copyright (c) Mindgrove Technologies Pvt. Ltd 2023. All rights reserved.
  * 
  */
-#include"secure_iot_qspi.h"
+#include"target/riscv/secure_iot_qspi.h"
+#include"target/riscv/secure_iot_common.h"
+
 /**
  * @fn uint32_t fastReadQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length)
  * 
