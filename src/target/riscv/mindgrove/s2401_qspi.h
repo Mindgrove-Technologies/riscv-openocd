@@ -1,5 +1,5 @@
-#ifndef SECURE_IOT_QSPI_H
-#define SECURE_IOT_QSPI_H
+#ifndef s2401_QSPI_H
+#define s2401_QSPI_H
 #include <helper/time_support.h>
 #include <target/target.h>
 #define SUCCESS 0
@@ -146,5 +146,5 @@ typedef struct
   uint32_t wr_dcyc : 5;
   
 } qspi_msg;
-uint32_t QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_msg *msg);
+uint32_t s2401_QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_msg *msg);
 #endif

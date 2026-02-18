@@ -17,9 +17,11 @@ noinst_LTLIBRARIES += %D%/libriscv.la
        %D%/riscv-011_reg.h \
        %D%/riscv-013.h \
        %D%/riscv-013_reg.h \
-       %D%/secure_iot_qspi.h \
-       %D%/secure_iot_psram.h \
-       %D%/secure_iot_common.h \
+       %D%/mindgrove/s2401_qspi.h \
+       %D%/mindgrove/s2401_psram.h \
+       %D%/mindgrove/s2401_common.h \
+       %D%/mindgrove/secure_iot_qspi.h \
+       %D%/mindgrove/secure_iot_common.h \
        %D%/batch.c \
        %D%/program.c \
        %D%/riscv-011.c \
@@ -31,9 +33,11 @@ noinst_LTLIBRARIES += %D%/libriscv.la
        %D%/riscv_semihosting.c \
        %D%/debug_defines.c \
        %D%/debug_reg_printer.c \
-       %D%/secure_iot_qspi.c \
-       %D%/secure_iot_psram_driver.c \
-       %D%/secure_iot.c 
+       %D%/mindgrove/s2401_qspi.c \
+       %D%/mindgrove/s2401_psram_driver.c \
+       %D%/mindgrove/s2401.c\
+       %D%/mindgrove/secure_iot_qspi.c \
+       %D%/mindgrove/secureiot.c
 
 
 STARTUP_TCL_SRCS += %D%/startup.tcl

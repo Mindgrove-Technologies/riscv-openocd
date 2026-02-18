@@ -2,7 +2,7 @@
 #include <helper/command.h>     /* Command registration and parsing macros */
 #include <helper/log.h>         /* LOG_INFO, LOG_ERROR, etc. */
 #include <target/target.h>       /* target_write_u32 and target struct definition */
-#include "secure_iot_psram_driver.h"
+#include "s2401_psram_driver.h"
 
 
 
@@ -27,15 +27,15 @@ uint16_t PSRAM_Init(struct target *target,uint8_t qspinum) {
     psram_msg.alternate_byte_mode = CCR_ABMODE_NIL;
     psram_msg.fthresh = POW2_MINUS1(0);
     psram_msg.length = 0;
-    QSPI_Transaction(target,qspinum,&psram_msg);
+    s2401_QSPI_Transaction(target,qspinum,&psram_msg);
 
     /*RESET command*/
     psram_msg.instruction = 0x99;
-    QSPI_Transaction(target,qspinum,&psram_msg);
+    s2401_QSPI_Transaction(target,qspinum,&psram_msg);
     
     /*Enter QAUD_MODE command*/
     psram_msg.instruction = 0x35;
-    QSPI_Transaction(target,qspinum,&psram_msg);
+    s2401_QSPI_Transaction(target,qspinum,&psram_msg);
     
     /*Enter RAM MODE 4 lines*/
     psram_msg.mm_mode = CCR_MM_MODE_RAM;
@@ -47,12 +47,12 @@ uint16_t PSRAM_Init(struct target *target,uint8_t qspinum) {
     psram_msg.wr_dcyc=0;
     psram_msg.rd_instr=0xEB;
     psram_msg.rd_dcyc=6;
-    QSPI_Transaction(target,qspinum,&psram_msg);
+    s2401_QSPI_Transaction(target,qspinum,&psram_msg);
     return ERROR_OK;
 
 }
 
-int handle_psram_init(struct command_invocation *cmd)
+int s2401_handle_psram_init(struct command_invocation *cmd)
 {
     // 1. Check if an argument was actually provided
     if (CMD_ARGC != 1) {

@@ -1,7 +1,7 @@
-#include "secure_iot_qspi.h"
+#include "s2401_qspi.h"
 #include <helper/log.h>
 
-uint32_t QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_msg *msg)
+uint32_t s2401_QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_msg *msg)
 {
   if (instance_number > 1)
     return -1;
@@ -63,6 +63,9 @@ uint32_t QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_
   // uint32_t temp;
   if (msg->functional_mode == CCR_FMODE_INDIRECT_WRITE && msg->length != 0)
   {
+        
+    
+
     uint64_t *word_64 = (uint64_t *)msg->data_buffer;
     target_read_u32(target, cr_address, &cr_value);
     cr_value &= ~CR_FTHRES(15);
@@ -148,6 +151,7 @@ uint32_t QSPI_Transaction(struct target *target, uint32_t instance_number, qspi_
   }
   else if (msg->functional_mode == CCR_FMODE_INDIRECT_READ)
   {
+    LOG_INFO("instr%x!",msg->instruction);
     //   QUADSPI_Reg(instance_number)->CR&= ~(CR_FTHRES(15));
     target_read_u32(target, cr_address, &cr_value);
     cr_value &= ~(CR_FTHRES(15));
