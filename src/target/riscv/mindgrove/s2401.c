@@ -10,7 +10,7 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_psram_init,
         .mode = COMMAND_EXEC,
         .help = "Initialize PSRAM",
-        .usage = "Ram mode",
+        .usage = "<instance>",
     },
 
     {
@@ -18,7 +18,7 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_flash_erase,
         .mode = COMMAND_EXEC,
         .help = "Flash erase",
-        .usage = "Flash erase",
+        .usage = "<instance>",
     },
 
     {
@@ -26,6 +26,7 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_flash_write,
         .mode = COMMAND_EXEC,
         .help = "Flash write",
+        .usage = "<file> <address>",
     },
 
     {
@@ -33,6 +34,7 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_flash_xip,
         .mode = COMMAND_EXEC,
         .help = "Enable flash XIP",
+        .usage = "<instance>",
     },
 
     {
@@ -40,6 +42,8 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_sector_erase,
         .mode = COMMAND_EXEC,
         .help = "Erase flash sector",
+        .usage = "<instance> <address> <num_sectors>",
+
     },
 
     {
@@ -47,18 +51,21 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_reset,
         .mode = COMMAND_EXEC,
         .help = "Reset s2401",
+        .usage = "",
     },
 
     {
         .name = "flash_write_length",
         .handler = s2401_handle_flash_write_length,
         .mode = COMMAND_EXEC,
+        .usage = "<instance> <address> <file>",
     },
 
     {
         .name = "flash_write_data",
         .handler = s2401_handle_flash_write_data,
         .mode = COMMAND_EXEC,
+        .usage = "<address> <data>",
     },
 
     COMMAND_REGISTRATION_DONE

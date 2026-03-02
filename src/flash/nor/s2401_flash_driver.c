@@ -1248,8 +1248,8 @@ s2401_writeDisable(target,qspi_number);/*Disable write operation*/
 uint8_t temp = 0;
 while(1)
 {
-temp =  readFlagStatusRegister(target,qspi_number);
-sr = readStatusRegister1(target,qspi_number);
+temp =  s2401_readFlagStatusRegister(target,qspi_number);
+sr = s2401_readStatusRegister1(target,qspi_number);
 temp = temp & (1<<7);
 if(temp == (1<<7)&&(sr == 0)){/*Wait till ready bit is set,used to check if erase operation is in progress*/
     break; 

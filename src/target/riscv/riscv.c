@@ -6179,14 +6179,14 @@ static const struct command_registration riscv_command_handlers[] = {
 		.name = "secureiot",
 		.mode = COMMAND_ANY,
 		.help = "secureiot Command Group",
-		.usage = "",
+		.usage = "Used for Secureiot",
 		.chain = secureiot_command_handlers
 	},
 			{
 		.name = "s2401",
 		.mode = COMMAND_ANY,
 		.help = "s2401 Command Group",
-		.usage = "",
+		.usage = "Used for s2401",
 		.chain = s2401_command_handlers
 	},
 	COMMAND_REGISTRATION_DONE
