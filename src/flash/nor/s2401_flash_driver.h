@@ -1,5 +1,5 @@
-#ifndef SECURE_IOT_QSPI_FLASH_H
-#define SECURE_IOT_QSPI_FLASH_H
+#ifndef s2401_QSPI_FLASH_H
+#define s2401_QSPI_FLASH_H
 /**
  * Project                           : Secure IoT SoC
  * Name of the file                  : qspi_flash_driver.c
@@ -18,7 +18,9 @@
  * @copyright Copyright (c) Mindgrove Technologies Pvt. Ltd 2023. All rights reserved.
  * 
  */
-#include"target/riscv/mindgrove/secure_iot_qspi.h"
+#include"target/riscv/mindgrove/s2401_qspi.h"
+#include"target/riscv/mindgrove/s2401_psram_driver.h"
+
 /**
  * @fn uint32_t fastReadQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length)
  * 
@@ -31,7 +33,7 @@
  * 
  * @return SUCCESS if operation is successful,ENODEV if invalid instance number and ELENEXCEED is length of read and write parameters exceeded.
  */
-uint32_t fastReadQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length);
+uint32_t s2401_fastReadQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length);
 /**
  * @fn uint32_t fastReadQuadIO(struct target *target,uint8_t qspinum,uint8_t *data,uint32_t address,uint8_t data_length)
  * 
@@ -44,7 +46,7 @@ uint32_t fastReadQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32
  * 
  * @return SUCCESS if operation is successful,ENODEV if invalid instance number and ELENEXCEED is length of read and write parameters exceeded.
  */
-uint32_t fastReadQuadIO(struct target *target,uint8_t qspinum,uint8_t *data,uint32_t address,uint8_t data_length);
+uint32_t s2401_fastReadQuadIO(struct target *target,uint8_t qspinum,uint8_t *data,uint32_t address,uint8_t data_length);
 /**
  * @fn uint32_t fastReadSingle(struct target *target,uint8_t qspinum,uint8_t *data,uint32_t address,uint8_t data_length)
  * 
@@ -57,7 +59,7 @@ uint32_t fastReadQuadIO(struct target *target,uint8_t qspinum,uint8_t *data,uint
  * 
  * @return SUCCESS if operation is successful,ENODEV if invalid instance number and ELENEXCEED is length of read and write parameters exceeded.
  */
-uint32_t fastReadSingle(struct target *target,uint8_t qspinum,uint8_t *data,uint32_t address,uint8_t data_length);
+uint32_t s2401_fastReadSingle(struct target *target,uint8_t qspinum,uint8_t *data,uint32_t address,uint8_t data_length);
 /**
  * @fn uint32_t inputpageQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length)
  * 
@@ -70,7 +72,7 @@ uint32_t fastReadSingle(struct target *target,uint8_t qspinum,uint8_t *data,uint
  * 
  * @return SUCCESS if operation is successful,ENODEV if invalid instance number and ELENEXCEED is length of read and write parameters exceeded.
  */
-uint32_t inputpageQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length);
+uint32_t s2401_inputpageQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length);
 /**
  * @fn uint32_t inputpageSingle(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length)
  * 
@@ -83,7 +85,7 @@ uint32_t inputpageQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint3
  * 
  * @return SUCCESS if operation is successful,ENODEV if invalid instance number and ELENEXCEED is length of read and write parameters exceeded.
  */
-uint32_t inputpageSingle(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length);
+uint32_t s2401_inputpageSingle(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length);
 /**
  * @fn void sector4KErase(struct target *target,uint8_t qspinum,uint32_t address)
  * 
@@ -94,7 +96,7 @@ uint32_t inputpageSingle(struct target *target,uint8_t qspinum,uint8_t* data,uin
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t sector4KErase(struct target *target,uint8_t qspinum,uint32_t address);
+uint32_t s2401_sector4KErase(struct target *target,uint8_t qspinum,uint32_t address);
 /**
  * @fn void sector32KErase(struct target *target,uint8_t qspinum,uint32_t address)
  * 
@@ -105,7 +107,7 @@ uint32_t sector4KErase(struct target *target,uint8_t qspinum,uint32_t address);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t sector32KErase(struct target *target,uint8_t qspinum,uint32_t address);
+uint32_t s2401_sector32KErase(struct target *target,uint8_t qspinum,uint32_t address);
 /**
  * @fn void chipErase(struct target *target,uint8_t qspinum)
  * 
@@ -115,7 +117,7 @@ uint32_t sector32KErase(struct target *target,uint8_t qspinum,uint32_t address);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t chipErase(struct target *target,uint8_t qspinum);
+uint32_t s2401_chipErase(struct target *target,uint8_t qspinum);
 /**
  * @fn void writeEnable(struct target *target,uint8_t qspinum)
  * 
@@ -125,7 +127,7 @@ uint32_t chipErase(struct target *target,uint8_t qspinum);
  * 
  * @return @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t writeEnable(struct target *target,uint8_t qspinum);
+uint32_t s2401_writeEnable(struct target *target,uint8_t qspinum);
 /**
  * @fn void writeDisable(struct target *target,uint8_t qspinum)
  * 
@@ -135,7 +137,7 @@ uint32_t writeEnable(struct target *target,uint8_t qspinum);
  * 
  * @return @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t writeDisable(struct target *target,uint8_t qspinum);
+uint32_t s2401_writeDisable(struct target *target,uint8_t qspinum);
 /**
  * @fn void suspend(struct target *target,uint8_t qspinum)
  * 
@@ -145,7 +147,7 @@ uint32_t writeDisable(struct target *target,uint8_t qspinum);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t suspend(struct target *target,uint8_t qspinum);
+uint32_t s2401_suspend(struct target *target,uint8_t qspinum);
 /**
  * @fn void resume(struct target *target,uint8_t qspinum)
  * 
@@ -155,7 +157,7 @@ uint32_t suspend(struct target *target,uint8_t qspinum);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t resume(struct target *target,uint8_t qspinum);
+uint32_t s2401_resume(struct target *target,uint8_t qspinum);
 /**
  * @fn uint32_t power_down(struct target *target,uint8_t qspinum)
  * 
@@ -165,7 +167,7 @@ uint32_t resume(struct target *target,uint8_t qspinum);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t power_down(struct target *target,uint8_t qspinum);
+uint32_t s2401_power_down(struct target *target,uint8_t qspinum);
 /**
  * @fn uint32_t release_power_down(struct target *target,uint8_t qspinum)
  * 
@@ -175,7 +177,7 @@ uint32_t power_down(struct target *target,uint8_t qspinum);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t release_power_down(struct target *target,uint8_t qspinum);
+uint32_t s2401_release_power_down(struct target *target,uint8_t qspinum);
 /**
  * @fn uint8_t readStatusRegister1(struct target *target,uint8_t qspinum)
  * 
@@ -185,7 +187,7 @@ uint32_t release_power_down(struct target *target,uint8_t qspinum);
  * 
  * @return Returns value in Status Register 1.
  */
-uint8_t readStatusRegister1(struct target *target,uint8_t qspinum);
+uint8_t s2401_readStatusRegister1(struct target *target,uint8_t qspinum);
 /**
  * @fn uint8_t readStatusRegister2(struct target *target,uint8_t qspinum)
  * 
@@ -195,7 +197,7 @@ uint8_t readStatusRegister1(struct target *target,uint8_t qspinum);
  * 
  * @return Returns value in Status Register 2.
  */
-uint8_t readStatusRegister2(struct target *target,uint8_t qspinum);
+uint8_t s2401_readStatusRegister2(struct target *target,uint8_t qspinum);
 /**
  * @fn uint8_t readStatusRegister3(struct target *target,uint8_t qspinum)
  * 
@@ -205,7 +207,7 @@ uint8_t readStatusRegister2(struct target *target,uint8_t qspinum);
  * 
  * @return Returns value in Status Register 3.
  */
-uint8_t readStatusRegister3(struct target *target,uint8_t qspinum);
+uint8_t s2401_readStatusRegister3(struct target *target,uint8_t qspinum);
 /**
  * @fn uint8_t readFlagStatusRegister(struct target *target,uint8_t qspinum)
  * 
@@ -215,7 +217,7 @@ uint8_t readStatusRegister3(struct target *target,uint8_t qspinum);
  * 
  * @return Returns value in Flag Status Register.
  */
-uint8_t readFlagStatusRegister(struct target *target,uint8_t qspinum);
+uint8_t s2401_readFlagStatusRegister(struct target *target,uint8_t qspinum);
 /**
  * @fn void writeEnableStatusRegister(struct target *target,uint8_t qspinum)
  * 
@@ -225,7 +227,7 @@ uint8_t readFlagStatusRegister(struct target *target,uint8_t qspinum);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t writeEnableStatusRegister(struct target *target,uint8_t qspinum);
+uint32_t s2401_writeEnableStatusRegister(struct target *target,uint8_t qspinum);
 /**
  * @fn void writeStatusRegister1(struct target *target,uint8_t qspinum,uint8_t* statusData)
  * 
@@ -236,7 +238,7 @@ uint32_t writeEnableStatusRegister(struct target *target,uint8_t qspinum);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t writeStatusRegister1(struct target *target,uint8_t qspinum,uint8_t* statusData);
+uint32_t s2401_writeStatusRegister1(struct target *target,uint8_t qspinum,uint8_t* statusData);
 /**
  * @fn void writeStatusRegister2(struct target *target,uint8_t qspinum,uint8_t* statusData)
  * 
@@ -247,7 +249,7 @@ uint32_t writeStatusRegister1(struct target *target,uint8_t qspinum,uint8_t* sta
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t writeStatusRegister2(struct target *target,uint8_t qspinum,uint8_t* statusData);
+uint32_t s2401_writeStatusRegister2(struct target *target,uint8_t qspinum,uint8_t* statusData);
 /**
  * @fn void writeStatusRegister3(struct target *target,uint8_t qspinum,uint8_t* statusData)
  * 
@@ -258,7 +260,7 @@ uint32_t writeStatusRegister2(struct target *target,uint8_t qspinum,uint8_t* sta
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t writeStatusRegister3(struct target *target,uint8_t qspinum,uint8_t* statusData);
+uint32_t s2401_writeStatusRegister3(struct target *target,uint8_t qspinum,uint8_t* statusData);
 /**
  * @fn uint8_t readGlobalFreezeBit(struct target *target,uint8_t qspinum)
  *
@@ -268,7 +270,7 @@ uint32_t writeStatusRegister3(struct target *target,uint8_t qspinum,uint8_t* sta
  *
  * @return 1 if global freeze bit is set otherwise 0.
  */
-uint8_t readGlobalFreezeBit(struct target *target,uint8_t qspinum);
+uint8_t s2401_readGlobalFreezeBit(struct target *target,uint8_t qspinum);
 /**
  * @fn uint32_t writeGlobalFreezeBit(struct target *target,uint8_t qspinum)
  *
@@ -278,7 +280,7 @@ uint8_t readGlobalFreezeBit(struct target *target,uint8_t qspinum);
  *
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t writeGlobalFreezeBit(struct target *target,uint8_t qspinum,uint8_t *data);
+uint32_t s2401_writeGlobalFreezeBit(struct target *target,uint8_t qspinum,uint8_t *data);
 /**
  * @fn uint8_t readFlashSFDP(struct target *target,uint8_t qspinum,uint32_t address)
  * 
@@ -289,7 +291,7 @@ uint32_t writeGlobalFreezeBit(struct target *target,uint8_t qspinum,uint8_t *dat
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint8_t readFlashSFDP(struct target *target,uint8_t qspinum,uint32_t address);
+uint8_t s2401_readFlashSFDP(struct target *target,uint8_t qspinum,uint32_t address);
 /**
  * @fn uint32_t readNVCR(struct target *target,uint8_t qspinum, uint8_t* data)
  * 
@@ -300,7 +302,7 @@ uint8_t readFlashSFDP(struct target *target,uint8_t qspinum,uint32_t address);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t readNVCR(struct target *target,uint8_t qspinum, uint8_t* data);
+uint32_t s2401_readNVCR(struct target *target,uint8_t qspinum, uint8_t* data);
 /**
  * @fn uint32_t readJedecID(struct target *target,uint8_t qspinum, uint8_t *id)
  * 
@@ -311,7 +313,7 @@ uint32_t readNVCR(struct target *target,uint8_t qspinum, uint8_t* data);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t readJedecID(struct target *target,uint8_t qspinum, uint8_t *id);
+uint32_t s2401_readJedecID(struct target *target,uint8_t qspinum, uint8_t *id);
 /**
  * @fn uint32_t writeNVCR(struct target *target,uint8_t qspinum, uint8_t* data)
  * 
@@ -322,7 +324,7 @@ uint32_t readJedecID(struct target *target,uint8_t qspinum, uint8_t *id);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t writeNVCR(struct target *target,uint8_t qspinum, uint8_t* data);
+uint32_t s2401_writeNVCR(struct target *target,uint8_t qspinum, uint8_t* data);
 /**
  * @fn uint32_t flash_xip_init(struct target *target,uint8_t qspinum, int flash_size)
  * 
@@ -333,5 +335,5 @@ uint32_t writeNVCR(struct target *target,uint8_t qspinum, uint8_t* data);
  * 
  * @return SUCCESS if operation is successful and ENODEV if invalid instance number.
  */
-uint32_t flash_xip_init(struct target *target,uint8_t qspinum, int flash_size);
+uint32_t s2401_flash_xip_init(struct target *target,uint8_t qspinum, int flash_size);
 #endif

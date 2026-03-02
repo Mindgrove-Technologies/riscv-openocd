@@ -39,6 +39,10 @@
 
 #define RISCV_HALT_GROUP_REPOLL_LIMIT 5
 
+extern const struct command_registration s2401_command_handlers[];
+extern const struct command_registration secureiot_command_handlers[];
+
+
 static uint8_t ir_dtmcontrol[4] = {DTMCONTROL};
 struct scan_field select_dtmcontrol = {
 	.in_value = NULL,
@@ -6170,6 +6174,20 @@ static const struct command_registration riscv_command_handlers[] = {
 	},
 	{
 		.chain = smp_command_handlers
+	},
+		{
+		.name = "secureiot",
+		.mode = COMMAND_ANY,
+		.help = "secureiot Command Group",
+		.usage = "Used for Secureiot",
+		.chain = secureiot_command_handlers
+	},
+			{
+		.name = "s2401",
+		.mode = COMMAND_ANY,
+		.help = "s2401 Command Group",
+		.usage = "Used for s2401",
+		.chain = s2401_command_handlers
 	},
 	COMMAND_REGISTRATION_DONE
 };
