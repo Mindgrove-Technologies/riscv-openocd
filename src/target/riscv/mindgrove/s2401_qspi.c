@@ -151,7 +151,6 @@ uint32_t s2401_QSPI_Transaction(struct target *target, uint32_t instance_number,
   }
   else if (msg->functional_mode == CCR_FMODE_INDIRECT_READ)
   {
-    LOG_INFO("instr%x!",msg->instruction);
     //   QUADSPI_Reg(instance_number)->CR&= ~(CR_FTHRES(15));
     target_read_u32(target, cr_address, &cr_value);
     cr_value &= ~(CR_FTHRES(15));
