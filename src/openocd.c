@@ -37,8 +37,8 @@
 #include <strings.h>
 #endif
 
-#define REL_MAJOR 1
-#define REL_MINOR 3
+#define REL_MAJOR 2
+#define REL_MINOR 0
 
 #define STRINGIFY_HELPER(x) #x
 #define STRINGIFY(x) STRINGIFY_HELPER(x)
