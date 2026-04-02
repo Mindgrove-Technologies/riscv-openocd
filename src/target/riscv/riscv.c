@@ -41,7 +41,6 @@
 
 extern const struct command_registration s2401_command_handlers[];
 extern const struct command_registration secureiot_command_handlers[];
-extern const struct command_registration v2500_command_handlers[];
 
 
 static uint8_t ir_dtmcontrol[4] = {DTMCONTROL};
@@ -6176,26 +6175,19 @@ static const struct command_registration riscv_command_handlers[] = {
 	{
 		.chain = smp_command_handlers
 	},
-	{
+		{
 		.name = "secureiot",
 		.mode = COMMAND_ANY,
 		.help = "secureiot Command Group",
 		.usage = "Used for Secureiot",
 		.chain = secureiot_command_handlers
 	},
-	{
+			{
 		.name = "s2401",
 		.mode = COMMAND_ANY,
 		.help = "s2401 Command Group",
 		.usage = "Used for s2401",
 		.chain = s2401_command_handlers
-	},
-	{
-		.name = "v2500",
-		.mode = COMMAND_ANY,
-		.help = "v2500 Command Group",
-		.usage = "Used for v2500",
-		.chain = v2500_command_handlers
 	},
 	COMMAND_REGISTRATION_DONE
 };
@@ -6283,8 +6275,8 @@ static void riscv_info_init(struct target *target, struct riscv_info *r)
 
 	r->isrmask_mode = RISCV_ISRMASK_OFF;
 
-	r->mem_access_methods[0] = RISCV_MEM_ACCESS_SYSBUS;
-	r->mem_access_methods[1] = RISCV_MEM_ACCESS_PROGBUF;
+	r->mem_access_methods[0] = RISCV_MEM_ACCESS_PROGBUF;
+	r->mem_access_methods[1] = RISCV_MEM_ACCESS_SYSBUS;
 	r->mem_access_methods[2] = RISCV_MEM_ACCESS_ABSTRACT;
 
 	r->num_enabled_mem_access_methods = RISCV_MEM_ACCESS_MAX_METHODS_NUM;
