@@ -885,6 +885,10 @@ if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
 }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
    qspi_number = 1;
 }
+else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
+}
 uint32_t mask_address =start_address&~(0xF<<28);
 // command_print(CMD, "mask address: 0x%x\n", mask_address);
 // command_print(CMD, "QSPI number: 0x%x\n", qspi_number);
@@ -1097,6 +1101,10 @@ if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
 }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
    qspi_number = 1;
 }
+else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
+}
 uint32_t mask_address =start_address&~(0xF<<28);
 command_print(CMD, "mask address: 0x%x\n", mask_address);
 command_print(CMD, "QSPI number: 0x%x\n", qspi_number);
@@ -1160,6 +1168,10 @@ int s2401_handle_flash_write_data(struct command_invocation *cmd)
     }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
         qspi_number = 1;
     }
+    else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
+}
     // printf("Start address :%x",start_address);
     // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "\nqspi_number :%x ,total_length :%x",qspi_number,total_length);
     // Read the ELF header
@@ -1204,6 +1216,10 @@ if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
 }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
    qspi_number = 1;
 }
+else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
+}
 uint32_t mask_value =(mode==4)?(~(0xFFF)):((mode==32)?~(0x7FFF):0);
 uint32_t increment=(mode==4)?(0x1000):((mode==32)?(0x8000):0);
 uint32_t mask_address =start_address&~(0xF<<28);
@@ -1222,10 +1238,14 @@ return 0;
 
 int s2401_handle_reset(struct command_invocation *cmd)
 {
-struct target *target = get_current_target(CMD_CTX);
-target_write_u32(target,0x40408,3);
-target_write_u32(target,0x40400,0);
-return 0;
+    struct target *target = get_current_target(CMD_CTX);
+    uint32_t wd_wcycles = 0x40500;
+    uint32_t wd_cntrl = 0x40508;
+    uint64_t temp =100;
+    target_write_u64(target,wd_wcycles,temp);
+    temp = 5;
+    target_write_u16(target,wd_cntrl,temp);
+    return 0;
 }
 
 
