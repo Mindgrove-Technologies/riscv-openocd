@@ -1239,12 +1239,9 @@ return 0;
 int s2401_handle_reset(struct command_invocation *cmd)
 {
     struct target *target = get_current_target(CMD_CTX);
-    uint32_t wd_wcycles = 0x40500;
-    uint32_t wd_cntrl = 0x40508;
-    uint64_t temp =100;
-    target_write_u64(target,wd_wcycles,temp);
-    temp = 5;
-    target_write_u16(target,wd_cntrl,temp);
+    uint32_t wd_cntrl_reg = 0x40508;
+    uint16_t wd_cntrl = 5; // Enable the wdtimer and sets soft reset bit in control reg
+    target_write_u16(target, wd_cntrl_reg, wd_cntrl);
     return 0;
 }
 
