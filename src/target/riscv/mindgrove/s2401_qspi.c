@@ -139,7 +139,7 @@ uint32_t s2401_QSPI_Transaction(struct target *target, uint32_t instance_number,
       {
         target_read_u32(target, sr_address, &status_reg);
       } while (!(status_reg & SR_FTF));
-      target_write_u16(target, dr_address, *word_8);
+      target_write_u8(target, dr_address, *word_8);
       word_8++;
       i += 1;
     }
