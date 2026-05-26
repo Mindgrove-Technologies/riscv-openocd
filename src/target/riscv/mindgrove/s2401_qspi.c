@@ -19,7 +19,7 @@ uint32_t s2401_QSPI_Transaction(struct target *target, uint32_t instance_number,
   uint32_t dr_address = qspi_base + 0x20;
   uint32_t rmc_address = qspi_base + 0x38;
 
-
+  target_write_u32(target, cr_address,0);
   target_write_u32(target, cr_address, (CR_PRESCALER(msg->PRESCALER) \
   | CR_PMM(msg->PMM) | CR_APMS(msg->APMS) | \
   CR_TOIE(msg->TOIE) | CR_SMIE(msg->SMIE) | CR_FTIE(msg->FTIE) \

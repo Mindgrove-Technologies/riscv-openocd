@@ -13,6 +13,4 @@ __COMMAND_HANDLER(s2401_handle_reset);
 __COMMAND_HANDLER(s2401_handle_flash_write_length);
 __COMMAND_HANDLER(s2401_handle_flash_write_data);
 
-
-
 #endif
