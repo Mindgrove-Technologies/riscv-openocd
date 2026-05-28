@@ -48,6 +48,25 @@ void s2401_print_progress_bar(int progress, int total) {
     // fflush(stdout);  // Ensure that the output is immediately displayed
 }
 
+/**
+ * @brief s2401_handle_change_pc handler to force the target's Program Counter (PC) to 0x80000000.
+ *
+ * This function retrieves the current active target from the command context and verifies
+ * that it has been fully examined. To safely handle diverse architectures, it prioritizes 
+ * the RISC-V Debug Program Counter (@c dpc) before falling back to the standard standard 
+ * Program Counter (@c pc). 
+ *
+ * It validates the register's existence and bit-width to prevent buffer overflow/assertion 
+ * crashes, seamlessly writing to either 32-bit or 64-bit layouts. The register cache entry 
+ * is then flagged as valid and dirty, forcing OpenOCD to synchronize this new address 
+ * (0x80000000) directly into the hardware core execution register when the target resumes.
+ * 
+ * Purpose of this function is to abort the active QSPI instance, if the pc 
+ * in the 0x90000000 range or 0xb0000000 range we cannot abort the same QSPI instance that is active.
+ * If this case happens, we cannot erase or re-program the flash when there is already an application in it.
+ * This is the reason PC has been changed to 0x80000000 and then abort to that QSPI instance
+ */
+
 int s2401_handle_change_pc(struct command_invocation *cmd) {
 struct target *target = get_current_target(cmd->ctx);
     
