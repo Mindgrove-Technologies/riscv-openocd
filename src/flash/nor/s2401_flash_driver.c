@@ -6,6 +6,13 @@
 #include<elf.h>
 #include <helper/log.h>
 #include"s2401_flash_driver.h"
+#include "target/riscv/riscv.h"
+#include "target/riscv/riscv_reg.h"
+#include <inttypes.h> 
+#include "target/target.h"
+#include "target/register.h"
+#include "helper/types.h"
+#include "helper/binarybuffer.h"
 
 #define CHUNK_SIZE 128
 qspi_msg s2401_flash_msg={.PRESCALER=6,.CLK_MODE=0,.FMEM_SIZE = 27,.FTIE = 0,.TCEN=0,.TEIE=0,.TOIE=0,.SMIE = 0,.APMS= 0,.PMM=0};
@@ -40,6 +47,71 @@ void s2401_print_progress_bar(int progress, int total) {
     log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "] %.2f%%", progress_percentage * 100);
     // fflush(stdout);  // Ensure that the output is immediately displayed
 }
+
+/**
+ * @brief s2401_handle_change_pc handler to force the target's Program Counter (PC) to 0x80000000.
+ *
+ * This function retrieves the current active target from the command context and verifies
+ * that it has been fully examined. To safely handle diverse architectures, it prioritizes 
+ * the RISC-V Debug Program Counter (@c dpc) before falling back to the standard standard 
+ * Program Counter (@c pc). 
+ *
+ * It validates the register's existence and bit-width to prevent buffer overflow/assertion 
+ * crashes, seamlessly writing to either 32-bit or 64-bit layouts. The register cache entry 
+ * is then flagged as valid and dirty, forcing OpenOCD to synchronize this new address 
+ * (0x80000000) directly into the hardware core execution register when the target resumes.
+ * 
+ * Purpose of this function is to abort the active QSPI instance, if the pc 
+ * in the 0x90000000 range or 0xb0000000 range we cannot abort the same QSPI instance that is active.
+ * If this case happens, we cannot erase or re-program the flash when there is already an application in it.
+ * This is the reason PC has been changed to 0x80000000 and then abort to that QSPI instance
+ */
+
+int s2401_handle_change_pc(struct command_invocation *cmd) {
+struct target *target = get_current_target(cmd->ctx);
+    
+    if (!target) {
+        LOG_ERROR("No target selected or available");
+        return ERROR_FAIL;
+    }
+
+    if (!target_was_examined(target)) {
+        LOG_ERROR("Target not examined yet.");
+        return ERROR_FAIL;
+    }
+
+    /* 1. Try to get RISC-V 'dpc' first; fall back to standard 'pc' if not found */
+    struct reg *pc_reg = register_get_by_name(target->reg_cache, "dpc", 1);
+    if (!pc_reg) {
+        pc_reg = register_get_by_name(target->reg_cache, "pc", 1);
+    }
+
+    if (!pc_reg) {
+        LOG_ERROR("Could not find PC or DPC register in the current target cache");
+        return ERROR_FAIL;
+    }
+
+    /* 2. Clear register size check to avoid the assertion crash */
+    if (pc_reg->size == 0) {
+        LOG_ERROR("Register size is uninitialized");
+        return ERROR_FAIL;
+    }
+
+    /* 3. Apply the address safely depending on bit-width */
+    if (pc_reg->size <= 32) {
+        buf_set_u32(pc_reg->value, 0, pc_reg->size, 0x80000000);
+    } else {
+        buf_set_u64(pc_reg->value, 0, pc_reg->size, 0x80000000ULL);
+    }
+
+    /* 4. Flush to OpenOCD cache */
+    pc_reg->dirty = true;
+    pc_reg->valid = true;
+
+    LOG_DEBUG("Successfully forced execution vector target to 0x80000000");
+    return ERROR_OK;
+}
+
 uint32_t s2401_fastReadQuad(struct target *target,uint8_t qspinum,uint8_t* data,uint32_t address,uint8_t data_length){
     s2401_flash_msg.address = address;
     s2401_flash_msg.address_mode = CCR_ADMODE_SINGLE_LINE;
@@ -817,23 +889,6 @@ uint32_t s2401_flash_xip_init(struct target *target,uint8_t qspinum, int flash_s
     return s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
 }
 
-uint32_t s2401_psram_init(struct target *target,uint8_t qspinum, int ram_size,uint8_t fthresh){
-    s2401_flash_msg.address_mode = CCR_ADMODE_SINGLE_LINE;
-    s2401_flash_msg.address_size = CCR_ADSIZE_24_BIT;
-    s2401_flash_msg.FMEM_SIZE = ram_size;
-    s2401_flash_msg.instruction = 0x03;
-    s2401_flash_msg.instruction_mode = CCR_IMODE_SINGLE_LINE;
-    s2401_flash_msg.data_mode = CCR_DMODE_SINGLE_LINE;
-    s2401_flash_msg.functional_mode = CCR_FMODE_MMM;
-    s2401_flash_msg.dummy_mode = 0;
-    s2401_flash_msg.dummy_cycles = 7;
-    s2401_flash_msg.dummy_bit = 1;
-    s2401_flash_msg.mm_mode = CCR_MM_MODE_RAM;
-    s2401_flash_msg.alternate_byte_mode = CCR_ABMODE_NIL;
-    s2401_flash_msg.length = 0;
-    s2401_flash_msg.fthresh = fthresh;
-    return s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
-}
 int s2401_handle_flash_write(struct command_invocation *cmd)
 {
 /*
@@ -841,6 +896,7 @@ int s2401_handle_flash_write(struct command_invocation *cmd)
  * argv[2] = filename
  * argv[3] = size if code.bin is fed
  */
+s2401_handle_change_pc(cmd);
 unsigned int qspi_number = 0;
 //  uint32_t address = 0x30;
 //  uint8_t data[16];
@@ -884,6 +940,10 @@ if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
    qspi_number = 0;
 }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
    qspi_number = 1;
+}
+else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
 }
 uint32_t mask_address =start_address&~(0xF<<28);
 // command_print(CMD, "mask address: 0x%x\n", mask_address);
@@ -1049,6 +1109,7 @@ int s2401_handle_flash_write_length(struct command_invocation *cmd)
  * argv[2] = filename
  * argv[3] = size if code.bin is fed
  */
+s2401_handle_change_pc(cmd);
 uint8_t flag=0;
 unsigned int qspi_number = 0;
 //  uint32_t address = 0x30;
@@ -1096,6 +1157,10 @@ if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
    qspi_number = 0;
 }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
    qspi_number = 1;
+}
+else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
 }
 uint32_t mask_address =start_address&~(0xF<<28);
 command_print(CMD, "mask address: 0x%x\n", mask_address);
@@ -1149,6 +1214,7 @@ int s2401_handle_flash_write_data(struct command_invocation *cmd)
  * argv[1] = address
  * argv[2 ... n-1] = data
  */
+    s2401_handle_change_pc(cmd);
     uint32_t start_address,length=0;
     uint32_t total_length = (CMD_ARGC)-1;
     uint8_t qspi_number=0;
@@ -1160,6 +1226,10 @@ int s2401_handle_flash_write_data(struct command_invocation *cmd)
     }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
         qspi_number = 1;
     }
+    else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
+}
     // printf("Start address :%x",start_address);
     // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "\nqspi_number :%x ,total_length :%x",qspi_number,total_length);
     // Read the ELF header
@@ -1192,6 +1262,7 @@ int s2401_handle_sector_erase(struct command_invocation *cmd)
  * argv[1] = QSPI number
  * 
  */
+s2401_handle_change_pc(cmd);
 unsigned int start_address,no_of_sectors,mode,qspi_number=0;
 COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], mode);
 COMMAND_PARSE_NUMBER(uint, CMD_ARGV[1], start_address);
@@ -1203,6 +1274,10 @@ if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
    qspi_number = 0;
 }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
    qspi_number = 1;
+}
+else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
 }
 uint32_t mask_value =(mode==4)?(~(0xFFF)):((mode==32)?~(0x7FFF):0);
 uint32_t increment=(mode==4)?(0x1000):((mode==32)?(0x8000):0);
@@ -1222,10 +1297,11 @@ return 0;
 
 int s2401_handle_reset(struct command_invocation *cmd)
 {
-struct target *target = get_current_target(CMD_CTX);
-target_write_u32(target,0x40408,3);
-target_write_u32(target,0x40400,0);
-return 0;
+    struct target *target = get_current_target(CMD_CTX);
+    uint32_t wd_cntrl_reg = 0x40508;
+    uint16_t wd_cntrl = 5; // Enable the wdtimer and sets soft reset bit in control reg
+    target_write_u16(target, wd_cntrl_reg, wd_cntrl);
+    return 0;
 }
 
 
@@ -1235,6 +1311,7 @@ int s2401_handle_flash_erase(struct command_invocation *cmd)
  * argv[1] = QSPI number
  * 
  */
+s2401_handle_change_pc(cmd);
 unsigned int qspi_number;
 uint8_t sr;
 COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
@@ -1266,6 +1343,7 @@ int s2401_handle_flash_xip(struct command_invocation *cmd)
  * argv[1] = QSPI number
  * 
  */
+s2401_handle_change_pc(cmd);
 unsigned int qspi_number;
 COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
 struct target *target = get_current_target(CMD_CTX);
