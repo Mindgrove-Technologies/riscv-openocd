@@ -350,6 +350,7 @@ inline void Write_VCR(struct target *target,uint8_t instance_number, uint8_t ddr
     }   
 }
 
+
 uint8_t XSPI_Flash_Transaction(struct target *target,FlashTransaction* flash_transaction) {   
     uint8_t exit = 0;
     xspi_msg msg = {.PRESCALER=11,.CLK_MODE=0,.sioo=0,.FTIE=1,.TCEN=0,.TEIE=0,.TOIE=0,.TCIE=0,\
@@ -443,8 +444,74 @@ void v2500_print_progress_bar(int progress, int total) {
 }
 
 
+/**
+ * @brief v2500_handle_change_pc handler to force the target's Program Counter (PC) to 0x80000000.
+ *
+ * This function retrieves the current active target from the command context and verifies
+ * that it has been fully examined. To safely handle diverse architectures, it prioritizes 
+ * the RISC-V Debug Program Counter (@c dpc) before falling back to the standard standard 
+ * Program Counter (@c pc). 
+ *
+ * It validates the register's existence and bit-width to prevent buffer overflow/assertion 
+ * crashes, seamlessly writing to either 32-bit or 64-bit layouts. The register cache entry 
+ * is then flagged as valid and dirty, forcing OpenOCD to synchronize this new address 
+ * (0x80000000) directly into the hardware core execution register when the target resumes.
+ * 
+ * Purpose of this function is to abort the active QSPI instance, if the pc 
+ * in the 0x90000000 range or 0xb0000000 range we cannot abort the same QSPI instance that is active.
+ * If this case happens, we cannot erase or re-program the flash when there is already an application in it.
+ * This is the reason PC has been changed to 0x80000000 and then abort to that QSPI instance
+ */
+
+int v2500_handle_change_pc(struct command_invocation *cmd) {
+struct target *target = get_current_target(cmd->ctx);
+    
+    if (!target) {
+        LOG_ERROR("No target selected or available");
+        return ERROR_FAIL;
+    }
+
+    if (!target_was_examined(target)) {
+        LOG_ERROR("Target not examined yet.");
+        return ERROR_FAIL;
+    }
+
+    /* 1. Try to get RISC-V 'dpc' first; fall back to standard 'pc' if not found */
+    struct reg *pc_reg = register_get_by_name(target->reg_cache, "dpc", 1);
+    if (!pc_reg) {
+        pc_reg = register_get_by_name(target->reg_cache, "pc", 1);
+    }
+
+    if (!pc_reg) {
+        LOG_ERROR("Could not find PC or DPC register in the current target cache");
+        return ERROR_FAIL;
+    }
+
+    /* 2. Clear register size check to avoid the assertion crash */
+    if (pc_reg->size == 0) {
+        LOG_ERROR("Register size is uninitialized");
+        return ERROR_FAIL;
+    }
+
+    /* 3. Apply the address safely depending on bit-width */
+    if (pc_reg->size <= 32) {
+        buf_set_u32(pc_reg->value, 0, pc_reg->size, 0x80000000);
+    } else {
+        buf_set_u64(pc_reg->value, 0, pc_reg->size, 0x80000000ULL);
+    }
+
+    /* 4. Flush to OpenOCD cache */
+    pc_reg->dirty = true;
+    pc_reg->valid = true;
+
+    LOG_DEBUG("Successfully forced execution vector target to 0x80000000");
+    return ERROR_OK;
+}
+
 int v2500_handle_flash_write(struct command_invocation *cmd)
 {
+    v2500_handle_change_pc(cmd);
+
     FlashTransaction flash_transaction;
 /*
  * argv[1] = xSPI number
@@ -542,7 +609,7 @@ if(CMD_ARGC==1){
 FILE *fileheader = fopen(CMD_ARGV[0], "rb");
 fseek(fileheader, elf_header.e_phoff, SEEK_SET);
 for (int l = 0; l < elf_header.e_phnum; l++) {
-   log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "PROGRAM HEADER:%x\n",l);	
+   log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "PROGRAM HEADER:%x\n",l);	
     // Read the program header
     uint32_t val = fread(&phdr, sizeof(Elf64_Phdr), 1, fileheader);
     if (val != 1) {
@@ -551,12 +618,12 @@ for (int l = 0; l < elf_header.e_phnum; l++) {
     }
     // Check if the current program header is of type PT_LOAD (executable segment)
     if (phdr.p_type == PT_LOAD) {
-        log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "Segment start virtual address: 0x%lx\n",phdr.p_paddr);
+        log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Segment start virtual address: 0x%lx\n",phdr.p_paddr);
         fseek(file, phdr.p_offset, SEEK_SET); // Move to the segment's start
             unsigned char buffer[CHUNK_SIZE];
             uint8_t bytesReadInChunk;
             size_t remaining_bytes = phdr.p_filesz;
-            log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nSection length:%lx\n",remaining_bytes);
+            log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nSection length:%lx\n",remaining_bytes);
             uint8_t to_read;
             mask_address=phdr.p_paddr&~(0xF<<28);
             uint32_t erase_start_address = mask_address & ~(0xFFF);
@@ -574,9 +641,9 @@ for (int l = 0; l < elf_header.e_phnum; l++) {
             while (remaining_bytes > 0) {
                to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
                bytesReadInChunk = fread(buffer, 1, to_read, file);
-               log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",mask_address+offset);
+               log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",mask_address+offset);
                for(uint8_t i = 0;i<bytesReadInChunk;i++){
-                   log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
+                   log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
                }
                if(((mask_address+offset)&(~(0xFF))) == (((mask_address+offset)+bytesReadInChunk-1)&(~(0xFF)))){//check if start address and end address in same sector
                 flash_transaction.cmd = FLASH_CMD_EXT_PAGE_PROGRAM;
@@ -588,15 +655,15 @@ for (int l = 0; l < elf_header.e_phnum; l++) {
             }
             else
             {
-                log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nCrossing sector");
+                log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nCrossing sector");
                 uint32_t part1_address,part2_address;
                 uint8_t part1_length,part2_length;
                 part1_address = (mask_address+offset);
                 part2_address = ((mask_address+offset)+bytesReadInChunk-1)&(~(0xFF));
                 part1_length = (part2_address-(mask_address+offset));
                 part2_length = (mask_address+offset)+bytesReadInChunk-part2_address;
-                log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nCrossing sector part1 addr:%x",part1_address);
-                log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nCrossing sector part2 addr:%x",part2_address);
+                log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nCrossing sector part1 addr:%x",part1_address);
+                log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nCrossing sector part2 addr:%x",part2_address);
                 
                 flash_transaction.cmd = FLASH_CMD_EXT_PAGE_PROGRAM;
                 flash_transaction.address = part1_address;
@@ -631,9 +698,11 @@ fclose(file);
    flash_transaction.data_length = 0;
 
    for(uint32_t s = erase_start_address;s<=erase_end_address;s+=0x1000) {
-
+        
+        log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\n erasing addr:%x",s);
         flash_transaction.data_length = 0;
         flash_transaction.address=s;
+        
         XSPI_Flash_Transaction(target,&flash_transaction);
 
    }
@@ -647,9 +716,9 @@ fclose(file);
       flash_transaction.data_size = 1 ;
       XSPI_Flash_Transaction(target,&flash_transaction);
 
-      log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",start_address+offset);
+      log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",start_address+offset);
       for(uint8_t i = 0;i<16;i++){
-          log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
+          log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
       }
       progressed_length +=bytesReadInChunk;
       v2500_print_progress_bar(progressed_length, executable_binary_length);
@@ -669,6 +738,8 @@ int v2500_handle_flash_erase(struct command_invocation *cmd) {
      * argv[1] = xSPI number
      * 
      */
+    v2500_handle_change_pc(cmd);
+
     FlashTransaction flash_transaction;
     unsigned int xspi_number;
     COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], xspi_number);
@@ -694,6 +765,8 @@ int v2500_handle_flash_xip(struct command_invocation *cmd)
  * argv[1] = xSPI number
  * 
  */
+    v2500_handle_change_pc(cmd);
+
     FlashTransaction flash_transaction;
     unsigned int xspi_number;
     COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], xspi_number);

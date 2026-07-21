@@ -1,6 +1,6 @@
 #include<stdint.h>
 #include "v2500_xspi.h"
-
+#include <helper/log.h>
 // #define OCTOSPI_Reg(x) ((OCTOSPI_Type*)(OCTOSPI0_BASE + ((x) * XSPI_OFFSET)))
 
 // #define OCTOSPI_Reg(x) 
@@ -42,6 +42,7 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
     uint32_t RMC   =xspi_base+0x5c;
     
     uint32_t temp;
+
     temp = (DCR1_DEVSIZE(msg->FMEM_SIZE) | DCR1_CKMODE(msg->CLK_MODE) | DCR1_CSHT(msg->csht));
     target_write_u32(target,DCR1,temp);
 
@@ -51,8 +52,8 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
     temp = (DCR3_MAXTRAN(1)) | (DCR3_CSBOUND(1));
     target_write_u32(target,DCR3,temp);
 
-    temp=(CR_FMODE(msg->functional_mode) |CR_PMM(msg->PMM) | CR_APMS(msg->APMS) | CR_TOIE(msg->TOIE) | CR_SMIE(msg->SMIE) | CR_FTIE(msg->FTIE) | CR_TCIE(msg->TCIE) | CR_TEIE(msg->TEIE) | CR_TCEN(msg->TCEN) | CR_FTHRES(msg->fthresh) | CR_ABORT(msg->abort) | CR_EN(msg->enable)|  CR_HW_PROTECT(msg->hw_protect) | CR_DMAEN(msg->dmaen));
-    target_write_u32(target,CR,temp);
+
+    // target_write_u32(target,CR,temp);
 
     temp =(FCR_CTOF|FCR_CSMF|FCR_CTCF|FCR_CTEF);//clear flags
     target_write_u32(target,FCR,temp);
@@ -76,10 +77,23 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
 
     temp = (CCR_IMODE(msg->instruction_mode) | CCR_ISIZE(msg->instruction_size) | CCR_ADMODE(msg->address_mode) | CCR_ADSIZE(msg->address_size) | CCR_ABMODE(msg->alternate_byte_mode) | CCR_ABSIZE(msg->alternate_byte_size) | CCR_DMODE(msg->data_mode) | CCR_SIOO(msg->sioo) | CCR_MM_MODE(msg->mm_mode) | CCR_IDTR(msg->IDTR) | CCR_ADDTR(msg->ADDTR) | CCR_ABDTR(msg->ABDTR) | CCR_DDTR(msg->DDTR) | CCR_DQSE(msg->dqse));
     target_write_u32(target,CCR,temp);
-    if(msg->TCEN == 1)
+    if(msg->TCEN == 1) {
       target_write_u32(target,LPTR,msg->timeout);
-    if(msg->instruction_mode)
-      target_write_u32(target,IR,msg->instruction);
+
+    }
+    if(msg->instruction_mode) { 
+        // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nINST inside loop: %d" ,msg->instruction);
+        target_write_u32(target,IR,msg->instruction);
+        uint32_t ir_value1;
+        target_read_u32(target, IR, &ir_value1);
+        // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nIR VALUE: %d" ,ir_value1);
+    }
+    uint32_t cr_value1;
+    cr_value1 = (CR_FMODE(msg->functional_mode) |CR_PMM(msg->PMM) | CR_APMS(msg->APMS) | \
+      CR_TOIE(msg->TOIE) | CR_SMIE(msg->SMIE) | CR_FTIE(msg->FTIE) | CR_TCIE(msg->TCIE) | CR_TEIE(msg->TEIE) | \
+      CR_TCEN(msg->TCEN) | CR_FTHRES(msg->fthresh)| CR_EN(msg->enable) | CR_ABORT(msg->abort) |  \
+      CR_HW_PROTECT(msg->hw_protect) | CR_DMAEN(msg->dmaen));
+    target_write_u32(target,CR,cr_value1);
     if((msg->functional_mode == CCR_FMODE_MMM) && (msg->mm_mode == CCR_MM_MODE_RAM))
     {
       temp = RMC_WDCYC(msg->wr_dcyc) | RMC_RDCYC(msg->rd_dcyc) | RMC_WINSTR(msg->wr_instr) | RMC_RINSTR(msg->rd_instr);
@@ -91,6 +105,7 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
     if(msg->address_mode){
         target_write_u32(target,AR,msg->address);
     }
+   
 
     uint8_t i = 0;
      uint32_t status_reg;
