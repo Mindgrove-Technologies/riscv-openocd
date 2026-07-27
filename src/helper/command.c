@@ -45,17 +45,35 @@ static int help_del_command(struct command_context *cmd_ctx, const char *cmd_nam
 /* set of functions to wrap jimtcl internal data */
 static inline bool jimcmd_is_proc(Jim_Cmd *cmd)
 {
-	return cmd->isproc;
+#if defined(JIM_CMD_ISPROC)
+    return (cmd->flags & JIM_CMD_ISPROC) != 0;
+#else
+    return cmd->isproc;
+#endif
 }
 
 bool jimcmd_is_oocd_command(Jim_Cmd *cmd)
 {
-	return !cmd->isproc && cmd->u.native.cmdProc == jim_command_dispatch;
+    if (jimcmd_is_proc(cmd))
+        return false;
+
+    return cmd->u.native.cmdProc == jim_command_dispatch;
 }
 
 void *jimcmd_privdata(Jim_Cmd *cmd)
 {
-	return cmd->isproc ? NULL : cmd->u.native.privData;
+    if (!cmd)
+        return NULL;
+
+#if defined(JIM_CMD_ISPROC)
+    if (cmd->flags & JIM_CMD_ISPROC)
+        return NULL;
+#else
+    if (cmd->isproc)
+        return NULL;
+#endif
+
+    return cmd->u.native.privData;
 }
 
 static void tcl_output(void *privData, const char *file, unsigned int line,
