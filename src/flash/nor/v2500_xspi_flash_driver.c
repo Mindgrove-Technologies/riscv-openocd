@@ -811,3 +811,206 @@ int v2500_handle_reset(struct command_invocation *cmd)
     command_print(cmd, "NDM Reset pulsed successfully. System booting...");
     return ERROR_OK;
 }
+
+int v2500_handle_sector_erase(struct command_invocation *cmd)
+{
+/*
+ * argv[1] = QSPI number
+ * 
+ */
+v2500_handle_change_pc(cmd);
+unsigned int start_address,no_of_sectors,mode,xspi_number=0;
+COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], mode);
+COMMAND_PARSE_NUMBER(uint, CMD_ARGV[1], start_address);
+COMMAND_PARSE_NUMBER(uint, CMD_ARGV[2], no_of_sectors);
+struct target *target = get_current_target(CMD_CTX);
+FlashTransaction flash_transaction;
+command_print(CMD, "Requested sectors are erased");
+log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Sector Erase in Progress!!");
+
+if ((start_address & 0xF0000000) == 0xB0000000){
+   flash_transaction.instance_number = 0;
+}else if ((start_address & 0xF0000000) == 0xD0000000){
+   flash_transaction.instance_number = 1;
+}
+else{
+    command_print(CMD, "Not in the expected address range");
+    return ERROR_OK;
+}
+
+uint32_t mask_value =(mode==4)?(~(0xFFF)):((mode==32)?~(0x7FFF):0);
+uint32_t increment=(mode==4)?(0x1000):((mode==32)?(0x8000):0);
+uint32_t mask_address =start_address&~(0xF<<28);
+uint32_t erase_start_address = mask_address & mask_value;
+flash_transaction.instance_number=xspi_number;
+flash_transaction.address=0;
+for(uint32_t s = erase_start_address,i=0;i<no_of_sectors;s+=increment,i++){
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Erasing sector:%x\n",s);
+    if(mode==4){
+        flash_transaction.cmd = FLASH_CMD_ODDR_4KB_SUBSECTOR_ERASE;
+        flash_transaction.address=s;
+        XSPI_Flash_Transaction(target,&flash_transaction);
+    }
+    else if (mode==32){
+        flash_transaction.cmd = FLASH_CMD_ODDR_32KB_SUBSECTOR_ERASE;
+        flash_transaction.address=s;
+        XSPI_Flash_Transaction(target,&flash_transaction);
+    }
+}
+return 0;
+}
+
+int v2500_handle_flash_write_data(struct command_invocation *cmd)
+{
+/*
+ * argv[1] = address
+ * argv[2 ... n-1] = data
+ */
+    v2500_handle_change_pc(cmd);
+    uint32_t start_address,length=0;
+    uint32_t total_length = (CMD_ARGC)-1;
+    FlashTransaction flash_transaction;    
+    uint8_t __attribute__((unused)) data[CMD_ARGC-1];
+    struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
+    COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], start_address);
+    if ((start_address & 0xF0000000) == 0xB0000000){
+       flash_transaction.instance_number = 0;
+    }else if ((start_address & 0xF0000000) == 0xD0000000){
+       flash_transaction.instance_number = 1;
+    }
+    else{
+        command_print(CMD, "Not in the expected address range");
+        return ERROR_OK;
+    }
+    // printf("Start address :%x",start_address);
+    // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "\nxspi_number :%x ,total_length :%x",xspi_number,total_length);
+    // Read the ELF header
+    for(uint32_t i = 0;i<total_length;i++){
+        COMMAND_PARSE_NUMBER(u8, CMD_ARGV[i+1], data[i]);
+    }
+    // for(uint8_t j = 0;j<total_length;j++){
+    //       log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "%x ",data[j]);
+    // }
+    uint8_t *ptr = data;
+    for(uint32_t address __attribute__((unused)) = start_address&~(0xF<<28),l=0,remaining_length=total_length;remaining_length;address+=length){
+        length = (remaining_length>16)?16:remaining_length;
+
+        flash_transaction.cmd = FLASH_CMD_ODDR_PAGE_PROGRAM;
+        flash_transaction.address = address;
+        flash_transaction.data_length =length ;
+        flash_transaction.data_buffer=ptr+l;
+        XSPI_Flash_Transaction(target,&flash_transaction);
+
+        remaining_length-=length;
+        l+=length;
+    }
+return ERROR_OK;
+}
+
+int v2500_handle_flash_write_length(struct command_invocation *cmd)
+{
+/*
+ * argv[1] = QSPI number
+ * argv[2] = filename
+ * argv[3] = size if code.bin is fed
+ */
+v2500_handle_change_pc(cmd);
+uint8_t flag=0;
+//  uint32_t address = 0x30;
+//  uint8_t data[16];
+//  COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], xspi_number);
+struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
+const char *ext = strrchr(CMD_ARGV[0], '.');
+    // Check if an extension exists
+    if (ext != NULL) {
+        // Compare the extension with the desired formats
+        if (strcmp(ext, ".bin") == 0) {
+            flag = 2;
+        } else if (strcmp(ext, ".elf") == 0 || strcmp(ext, ".shakti") == 0) {
+            flag = 1;
+        } else {
+            command_print(CMD,"Invalid file format\n");
+        }
+    } else {
+        command_print(CMD,"No extension found\n");
+    }
+
+FILE *file = fopen(CMD_ARGV[0], "rb");
+if (file == NULL) {
+    // perror("Error opening file");
+    command_print(CMD, "File doesnt exist");
+    return -1;
+}
+Elf64_Ehdr elf_header;
+if(flag==1){
+    size_t bytesRead = fread(&elf_header, 1, sizeof(Elf64_Ehdr), file);
+if (bytesRead != sizeof(Elf64_Ehdr)) {
+    fclose(file);
+    return -1;
+}
+}
+
+
+uint32_t start_address;
+FlashTransaction flash_transaction;    
+
+
+// Read the ELF header
+COMMAND_PARSE_NUMBER(uint, CMD_ARGV[1], start_address);
+// Print the entry point address (start address) in hexadecimal
+command_print(CMD, "(start address): 0x%x\n", start_address);
+    if ((start_address & 0xF0000000) == 0xB0000000){
+       flash_transaction.instance_number = 0;
+    }else if ((start_address & 0xF0000000) == 0xD0000000){
+       flash_transaction.instance_number = 1;
+    }
+    else{
+        command_print(CMD, "Not in the expected address range");
+        return ERROR_OK;
+    }
+uint32_t mask_address =start_address&~(0xF<<28);
+command_print(CMD, "mask address: 0x%x\n", mask_address);
+command_print(CMD, "xSPI number: 0x%x\n", flash_transaction.instance_number);
+// Variable to accumulate the total length of binary data for executable sections
+size_t executable_binary_length = 0;
+Elf64_Phdr phdr;
+if(flag==1){
+// Get the program header table offset and number of entries
+fseek(file, elf_header.e_phoff, SEEK_SET);
+
+
+for (int l = 0; l < elf_header.e_phnum; l++) {
+    // Read the program header
+    uint32_t val = fread(&phdr, sizeof(Elf64_Phdr), 1, file);
+    if (val != 1) {
+        fclose(file);
+        return -1;  // Error reading program header
+    }
+    // Check if the current program header is of type PT_LOAD (executable segment)
+    if (phdr.p_type == PT_LOAD) {
+       executable_binary_length+=phdr.p_filesz;
+    }
+}
+}
+else if(flag==2){
+       // Seek to the end to find the length of the file
+   fseek(file, 0, SEEK_END);
+   executable_binary_length  = ftell(file);
+   rewind(file);  // Rewind to the beginning of the file
+}
+uint64_t executable_binary_length_copy = (uint64_t)executable_binary_length;
+uint8_t *ptr;     
+ptr =(uint8_t*)&executable_binary_length_copy;
+// writeEnable(target,flash_transaction.instance_number);/*Enable write operation*/
+// sector4KErase(target,flash_transaction.instance_number,mask_address & ~(0xFFF));
+// writeDisable(target,flash_transaction.instance_number);/*Enable write operation*/
+flash_transaction.cmd = FLASH_CMD_ODDR_PAGE_PROGRAM;
+flash_transaction.address = mask_address;
+flash_transaction.data_length = 8 ;
+flash_transaction.data_buffer=ptr;
+XSPI_Flash_Transaction(target,&flash_transaction);
+// Print the length of the executable binary data (excluding the ELF header)
+command_print(CMD, "Length of executable binary data (excluding ELF header): 0x%lx bytes\n", executable_binary_length_copy);
+command_print(CMD, "Completed writing length at mask address :%x",mask_address);
+return ERROR_OK;
+}

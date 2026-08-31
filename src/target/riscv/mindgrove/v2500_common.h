@@ -9,9 +9,9 @@ __COMMAND_HANDLER(v2500_handle_flash_erase);
 __COMMAND_HANDLER(v2500_handle_flash_write);
 __COMMAND_HANDLER(v2500_handle_flash_xip);
 __COMMAND_HANDLER(v2500_handle_reset);
-// __COMMAND_HANDLER(v2500_handle_sector_erase);
-// __COMMAND_HANDLER(v2500_handle_flash_write_length);
-// __COMMAND_HANDLER(v2500_handle_flash_write_data);
+__COMMAND_HANDLER(v2500_handle_sector_erase);
+__COMMAND_HANDLER(v2500_handle_flash_write_length);
+__COMMAND_HANDLER(v2500_handle_flash_write_data);
 
 
 

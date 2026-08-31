@@ -42,24 +42,24 @@ const struct command_registration v2500_command_handlers[] = {
         .help = "Reset v2500",
         .usage = "",
     },
-    // {
-    //     .name = "flash_sector_erase",
-    //     .handler = v2500_handle_sector_erase,
-    //     .mode = COMMAND_EXEC,
-    //     .help = "Erase flash sector",
-    // },
+    {
+        .name = "flash_sector_erase",
+        .handler = v2500_handle_sector_erase,
+        .mode = COMMAND_EXEC,
+        .help = "Erase flash sector",
+    },
 
-    // {
-    //     .name = "flash_write_length",
-    //     .handler = v2500_handle_flash_write_length,
-    //     .mode = COMMAND_EXEC,
-    // },
+    {
+        .name = "flash_write_length",
+        .handler = v2500_handle_flash_write_length,
+        .mode = COMMAND_EXEC,
+    },
 
-    // {
-    //     .name = "flash_write_data",
-    //     .handler = v2500_handle_flash_write_data,
-    //     .mode = COMMAND_EXEC,
-    // },
+    {
+        .name = "flash_write_data",
+        .handler = v2500_handle_flash_write_data,
+        .mode = COMMAND_EXEC,
+    },
 
     COMMAND_REGISTRATION_DONE
 };
