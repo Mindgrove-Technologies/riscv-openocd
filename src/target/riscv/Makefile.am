@@ -18,7 +18,8 @@ noinst_LTLIBRARIES += %D%/libriscv.la
        %D%/riscv-013.h \
        %D%/riscv-013_reg.h \
        %D%/mindgrove/s2401_qspi.h \
-       %D%/mindgrove/s2401_psram.h \
+       %D%/mindgrove/s2401_psram_driver.h \
+       %D%/mindgrove/v2500_psram_driver.h \
        %D%/mindgrove/s2401_common.h \
        %D%/mindgrove/secure_iot_qspi.h \
        %D%/mindgrove/secure_iot_common.h \
@@ -37,6 +38,7 @@ noinst_LTLIBRARIES += %D%/libriscv.la
        %D%/debug_reg_printer.c \
        %D%/mindgrove/s2401_qspi.c \
        %D%/mindgrove/s2401_psram_driver.c \
+       %D%/mindgrove/v2500_psram_driver.c \
        %D%/mindgrove/s2401.c \
        %D%/mindgrove/secure_iot_qspi.c \
        %D%/mindgrove/secureiot.c \

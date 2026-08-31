@@ -10,7 +10,7 @@
 #include"v2500_xspi_issi_flash.h"
 #include "target/riscv/riscv.h"
 
-#define CHUNK_SIZE 128
+#define CHUNK_SIZE 64
 #define POW2_MINUS1(n)   ((1U << (n)) - 1U)
 
 #define FLASH_CMD_EXT_ENTER_4_BYTE_ADDRESS_MODE                (&(FlashCommand){0x00000001, 0x00, 0x00, 0x000000B7,0x0})  // CCR=0x00000001, Dummy=0, WEL_WIP=0, OPCODE=0x000000B7,R/W=0x0
@@ -59,13 +59,14 @@
 
 
 xspi_msg WEL_WIP_VCR ={.PRESCALER=11,.FTIE=1,.FMEM_SIZE=25,.CLK_MODE=0, .sioo=0, .TCEN=0, .TEIE=0, .TOIE=0, .TCIE=0, .SMIE=0, .APMS=0, .PMM=0, .ABDTR=0, .csht=0,  .DDTR=0,.alternate_byte_size=0,.alternate_byte_mode=0,.address_size=2,.address_mode=0,.alternate_byte=0,.abort=0, .mm_mode=0, .sshift=0, .dhqc=0, .status_mask=0, .status_match=0, .pir=0, .timeout=0, .rd_instr=0, .wr_instr=0, .rd_dcyc=0, .wr_dcyc=0, .dual_mem=0, .FTF=0, .hw_protect=0,.enable=1};
+xspi_msg _VCR ={.PRESCALER=11,.FTIE=1,.FMEM_SIZE=25,.CLK_MODE=0, .sioo=0, .TCEN=0, .TEIE=0, .TOIE=0, .TCIE=0, .SMIE=0, .APMS=0, .PMM=0, .ABDTR=0, .csht=0,  .DDTR=0,.alternate_byte_size=0,.alternate_byte_mode=0,.address_size=2,.address_mode=0,.alternate_byte=0,.abort=0, .mm_mode=0, .sshift=0, .dhqc=0, .status_mask=0, .status_match=0, .pir=0, .timeout=0, .rd_instr=0, .wr_instr=0, .rd_dcyc=0, .wr_dcyc=0, .dual_mem=0, .FTF=0, .hw_protect=0,.enable=1};
 
 uint8_t DDR=0;
 
 
 inline void Set_WEL(struct target *target,uint8_t instance_number, FlashCommand *cmd) {
-    uint8_t value;
-    WEL_WIP_VCR.data_buffer=&value;
+    uint8_t value[2];
+    WEL_WIP_VCR.data_buffer=value;
     if(!(CHECK_DDR(cmd->ccr))){
         WEL_WIP_VCR.DDTR=CCR_GET_DDTR(FLASH_CMD_ODDR_WRITE_ENABLE->ccr);
         WEL_WIP_VCR.IDTR=CCR_GET_IDTR((FLASH_CMD_ODDR_WRITE_ENABLE->ccr));
@@ -143,15 +144,15 @@ inline void Set_WEL(struct target *target,uint8_t instance_number, FlashCommand 
             WEL_WIP_VCR.instruction_mode=CCR_GET_IMODE(FLASH_CMD_EXT_READ_STATUS_REGISTER->ccr);
             XSPI_Transaction(target, instance_number,&WEL_WIP_VCR);
         }
-        if(value&0x2){
+        if(value[0]&0x2){
             break; 
     }   
     }
 }
 
 inline void Check_WIP(struct target *target, uint8_t instance_number,FlashCommand *cmd) {
-    uint8_t value;
-    WEL_WIP_VCR.data_buffer=&value;
+    uint8_t value[2];
+    WEL_WIP_VCR.data_buffer=value;
     while(1)
     {
         if(!(CHECK_DDR(cmd->ccr))){
@@ -195,7 +196,7 @@ inline void Check_WIP(struct target *target, uint8_t instance_number,FlashComman
             WEL_WIP_VCR.instruction_mode=CCR_GET_IMODE(FLASH_CMD_EXT_READ_STATUS_REGISTER->ccr);
             XSPI_Transaction(target, instance_number,&WEL_WIP_VCR);
         }
-        if(value)
+        if(value[0]&0x1)
             continue;
         else
         {
@@ -206,7 +207,7 @@ inline void Check_WIP(struct target *target, uint8_t instance_number,FlashComman
 
 inline void Enter_four_byte_mode(struct target *target,uint8_t instance_number) {
 
-    // printf("9 \n");    
+
     WEL_WIP_VCR.DDTR=CCR_GET_DDTR(FLASH_CMD_EXT_ENTER_4_BYTE_ADDRESS_MODE->ccr);
     WEL_WIP_VCR.IDTR=CCR_GET_IDTR(FLASH_CMD_EXT_ENTER_4_BYTE_ADDRESS_MODE->ccr);
     WEL_WIP_VCR.ADDTR=CCR_GET_ADDTR(FLASH_CMD_EXT_ENTER_4_BYTE_ADDRESS_MODE->ccr);
@@ -226,8 +227,7 @@ inline void Enter_four_byte_mode(struct target *target,uint8_t instance_number) 
 }
 
 inline void Exit_four_byte_mode(struct target *target,uint8_t instance_number) {
-
-    // printf("10 \n");    
+    
     WEL_WIP_VCR.DDTR=CCR_GET_DDTR(FLASH_CMD_EXT_EXIT_4_BYTE_ADDRESS_MODE->ccr);
     WEL_WIP_VCR.IDTR=CCR_GET_IDTR(FLASH_CMD_EXT_EXIT_4_BYTE_ADDRESS_MODE->ccr);
     WEL_WIP_VCR.ADDTR=CCR_GET_ADDTR(FLASH_CMD_EXT_EXIT_4_BYTE_ADDRESS_MODE->ccr);
@@ -247,10 +247,10 @@ inline void Exit_four_byte_mode(struct target *target,uint8_t instance_number) {
 }
 
 
-inline void Write_VCR(struct target *target,uint8_t instance_number, uint8_t ddr_mode)
+uint8_t Write_VCR(struct target *target,uint8_t instance_number, uint8_t ddr_mode)
 {
-    uint8_t write_value;
-    WEL_WIP_VCR.data_buffer=&write_value;
+    uint8_t write_value[2];
+    WEL_WIP_VCR.data_buffer=write_value;
 
     if(DDR){
         WEL_WIP_VCR.DDTR=CCR_GET_DDTR(FLASH_CMD_ODDR_WRITE_VOLATILE_CONFIGURATION_REGISTER->ccr);
@@ -267,7 +267,7 @@ inline void Write_VCR(struct target *target,uint8_t instance_number, uint8_t ddr
         WEL_WIP_VCR.dsize=0x0;
         WEL_WIP_VCR.fthresh= POW2_MINUS1(0);
         WEL_WIP_VCR.instruction_size=1;
-        write_value = 0xFF;
+        write_value[0] = 0xFF;
         WEL_WIP_VCR.address_size=3;
         WEL_WIP_VCR.instruction_mode=CCR_GET_IMODE(FLASH_CMD_ODDR_WRITE_VOLATILE_CONFIGURATION_REGISTER->ccr);
         XSPI_Transaction(target, instance_number,&WEL_WIP_VCR);
@@ -286,15 +286,15 @@ inline void Write_VCR(struct target *target,uint8_t instance_number, uint8_t ddr
         WEL_WIP_VCR.length=0x1;
         WEL_WIP_VCR.dsize=0x0;
         WEL_WIP_VCR.fthresh= POW2_MINUS1(0);
-         WEL_WIP_VCR.instruction_size=0;
-         write_value = 0xE7;
-         WEL_WIP_VCR.address_size=2;
+        WEL_WIP_VCR.instruction_size=0;
+        write_value[0] = 0xE7; 
+        WEL_WIP_VCR.address_size=2;
         WEL_WIP_VCR.instruction_mode=CCR_GET_IMODE(FLASH_CMD_EXT_WRITE_VOLATILE_CONFIGURATION_REGISTER->ccr);
         XSPI_Transaction(target, instance_number,&WEL_WIP_VCR);
 
     }
-    uint8_t read_value;
-    WEL_WIP_VCR.data_buffer=&read_value;
+    uint8_t read_value[2];
+    WEL_WIP_VCR.data_buffer=read_value;
 
     while(1)
     {
@@ -312,18 +312,17 @@ inline void Write_VCR(struct target *target,uint8_t instance_number, uint8_t ddr
             WEL_WIP_VCR.length=2;
             WEL_WIP_VCR.dsize=0;
             WEL_WIP_VCR.address_size=3;
-
             WEL_WIP_VCR.fthresh= POW2_MINUS1(0);
             WEL_WIP_VCR.instruction_size=1;
             WEL_WIP_VCR.instruction_mode=CCR_GET_IMODE(FLASH_CMD_ODDR_READ_VOLATILE_CONFIGURATION_REGISTER->ccr);
             XSPI_Transaction(target, instance_number,&WEL_WIP_VCR);
-            if(read_value&0xE7){
+            uint8_t check = (read_value[0]&0xE7);
+            if(check){
                 break; 
-        }  
+            }
         }
         else{
 
-          
             WEL_WIP_VCR.DDTR=CCR_GET_DDTR(FLASH_CMD_EXT_READ_VOLATILE_CONFIGURATION_REGISTER->ccr);
             WEL_WIP_VCR.IDTR=CCR_GET_IDTR(FLASH_CMD_EXT_READ_VOLATILE_CONFIGURATION_REGISTER->ccr);
             WEL_WIP_VCR.ADDTR=CCR_GET_ADDTR(FLASH_CMD_EXT_READ_VOLATILE_CONFIGURATION_REGISTER->ccr);
@@ -336,18 +335,18 @@ inline void Write_VCR(struct target *target,uint8_t instance_number, uint8_t ddr
             WEL_WIP_VCR.address=0x0;
             WEL_WIP_VCR.length=1;
             WEL_WIP_VCR.address_size=2;
-
             WEL_WIP_VCR.dsize=0;
             WEL_WIP_VCR.fthresh= POW2_MINUS1(0);
             WEL_WIP_VCR.instruction_size=0;
             WEL_WIP_VCR.instruction_mode=CCR_GET_IMODE(FLASH_CMD_EXT_READ_VOLATILE_CONFIGURATION_REGISTER->ccr);
             XSPI_Transaction(target, instance_number,&WEL_WIP_VCR);
-            if(read_value&0xFF){
+            if(read_value[0]&0xFF){
                 break; 
         } 
         }
-        
-    }   
+     
+    } 
+    return 0;  
 }
 
 
@@ -367,7 +366,6 @@ uint8_t XSPI_Flash_Transaction(struct target *target,FlashTransaction* flash_tra
         .address_size=CCR_GET_ADSIZE(flash_transaction->cmd->ccr),.address_mode=CCR_GET_ADMODE(flash_transaction->cmd->ccr),\
         .instruction_size=0,.instruction_mode=CCR_GET_IMODE(flash_transaction->cmd->ccr),.alternate_byte=0,\
         .FTF = 0, .hw_protect = 0, .fthresh= POW2_MINUS1(flash_transaction->data_size), .enable=1};
-    // printf("newww\n"); 
 
     if(!(CHECK_DDR(flash_transaction->cmd->ccr)))
     {
@@ -384,6 +382,7 @@ uint8_t XSPI_Flash_Transaction(struct target *target,FlashTransaction* flash_tra
         Set_WEL(target,flash_transaction->instance_number,FLASH_CMD_EXT_WRITE_VOLATILE_CONFIGURATION_REGISTER);
         Write_VCR(target,flash_transaction->instance_number,0xE7);
         DDR=1;
+
 
     }
     else if((CHECK_DDR(flash_transaction->cmd->ccr)==1)&(DDR==1))
@@ -412,6 +411,7 @@ uint8_t XSPI_Flash_Transaction(struct target *target,FlashTransaction* flash_tra
     }
 
     XSPI_Transaction(target, flash_transaction->instance_number,&msg);
+    
     if (GET_WIP(*(flash_transaction->cmd)) )
     {
         Check_WIP(target, flash_transaction->instance_number,(flash_transaction->cmd));
@@ -636,12 +636,13 @@ for (int l = 0; l < elf_header.e_phnum; l++) {
                XSPI_Flash_Transaction(target,&flash_transaction);
 
             }
+        
+
             size_t offset = 0x000;
             
             while (remaining_bytes > 0) {
                to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
                bytesReadInChunk = fread(buffer, 1, to_read, file);
-               log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",mask_address+offset);
                for(uint8_t i = 0;i<bytesReadInChunk;i++){
                    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
                }
@@ -687,14 +688,14 @@ fclose(file);
 
 
 }else if(CMD_ARGC==2){
-   unsigned char buffer[CHUNK_SIZE];
+   uint8_t buffer[CHUNK_SIZE];
    uint8_t bytesReadInChunk;
    size_t offset = 0x000;
    size_t remaining_bytes = executable_binary_length;
    uint8_t to_read;
    uint32_t erase_start_address = mask_address & ~(0xFFF);
    uint32_t erase_end_address = (mask_address+executable_binary_length) & ~(0xFFF);
-   flash_transaction.cmd = FLASH_CMD_EXT_4KB_SUBSECTOR_ERASE;
+   flash_transaction.cmd = FLASH_CMD_ODDR_4KB_SUBSECTOR_ERASE;
    flash_transaction.data_length = 0;
 
    for(uint32_t s = erase_start_address;s<=erase_end_address;s+=0x1000) {
@@ -709,21 +710,15 @@ fclose(file);
    while (remaining_bytes > 0) {
       to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
       bytesReadInChunk = fread(buffer, 1, to_read, file);
-      flash_transaction.cmd = FLASH_CMD_EXT_PAGE_PROGRAM;
+      flash_transaction.cmd = FLASH_CMD_ODDR_PAGE_PROGRAM;
       flash_transaction.address = mask_address+offset;
       flash_transaction.data_length =bytesReadInChunk ;
       flash_transaction.data_buffer=buffer;
-      flash_transaction.data_size = 1 ;
       XSPI_Flash_Transaction(target,&flash_transaction);
-
-      log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",start_address+offset);
-      for(uint8_t i = 0;i<16;i++){
-          log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
-      }
       progressed_length +=bytesReadInChunk;
       v2500_print_progress_bar(progressed_length, executable_binary_length);
-       offset += bytesReadInChunk;
-       remaining_bytes-=bytesReadInChunk;
+      offset += bytesReadInChunk;
+      remaining_bytes-=bytesReadInChunk;
 }
 // Close the file
 fclose(file);
@@ -750,7 +745,7 @@ int v2500_handle_flash_erase(struct command_invocation *cmd) {
     command_print(CMD, "Flash erase is invoked with xSPI %x",xspi_number);
     command_print(CMD, "Wait Chip Erase in Progress!!");
     log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Wait Chip Erase in Progress!!");
-    flash_transaction.cmd=FLASH_CMD_EXT_CHIP_ERASE;
+    flash_transaction.cmd=FLASH_CMD_ODDR_CHIP_ERASE;
     flash_transaction.instance_number=xspi_number;
     flash_transaction.address=0;
     flash_transaction.data_length=0;
@@ -774,7 +769,7 @@ int v2500_handle_flash_xip(struct command_invocation *cmd)
        return ERROR_OK; 
     }
     flash_transaction.instance_number=xspi_number;
-    flash_transaction.cmd=FLASH_CMD_EXT_XIP_FAST_READ;
+    flash_transaction.cmd=FLASH_CMD_ODDR_XIP_FAST_READ;
     flash_transaction.data_length=0;
     flash_transaction.address=0;
     struct target *target = get_current_target(CMD_CTX);

@@ -42,7 +42,7 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
     uint32_t RMC   =xspi_base+0x5c;
     
     uint32_t temp;
-
+    target_write_u32(target, CR,0);
     temp = (DCR1_DEVSIZE(msg->FMEM_SIZE) | DCR1_CKMODE(msg->CLK_MODE) | DCR1_CSHT(msg->csht));
     target_write_u32(target,DCR1,temp);
 
@@ -82,11 +82,9 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
 
     }
     if(msg->instruction_mode) { 
-        // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nINST inside loop: %d" ,msg->instruction);
         target_write_u32(target,IR,msg->instruction);
         uint32_t ir_value1;
         target_read_u32(target, IR, &ir_value1);
-        // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nIR VALUE: %d" ,ir_value1);
     }
     uint32_t cr_value1;
     cr_value1 = (CR_FMODE(msg->functional_mode) |CR_PMM(msg->PMM) | CR_APMS(msg->APMS) | \
@@ -112,12 +110,12 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
     
     if(msg->functional_mode == CCR_FMODE_INDIRECT_WRITE && msg->length!= 0)
     {
-      uint64_t *word_64 = (uint64_t *)msg->data_buffer;
+      // uint64_t *word_64 = (uint64_t *);
 
     // //
     // // ---------------- 32-bit writes ----------------
     // //
-    uint32_t *word_32 = (uint32_t *)word_64;
+    uint32_t *word_32 = (uint32_t *)msg->data_buffer;
 
 
     target_read_u32(target, CR, &temp);
@@ -198,10 +196,7 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
           status_reg &= SR_FTF;
           if (status_reg)
           {
-            
             target_read_u8(target, DR, &((uint8_t*)msg->data_buffer)[i]);
-            
-            //   msg->data_buffer[i] = QUADSPI_Reg(instance_number)->DR.data_8;
             i++;
             if (i == msg->length)
               break;
@@ -228,7 +223,7 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
         target_read_u32(target,CR,&temp);
         temp&=~~CR_EN(1);
         target_write_u32(target, CR,temp);
-    } 
+    }
     return 0;
 }
 

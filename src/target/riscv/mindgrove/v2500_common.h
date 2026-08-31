@@ -4,7 +4,7 @@
 #include <helper/command.h>
 
 /* Use two underscores to declare the signature for external use */
-// __COMMAND_HANDLER(v2500_handle_psram_init);
+__COMMAND_HANDLER(v2500_handle_psram_init);
 __COMMAND_HANDLER(v2500_handle_flash_erase);
 __COMMAND_HANDLER(v2500_handle_flash_write);
 __COMMAND_HANDLER(v2500_handle_flash_xip);

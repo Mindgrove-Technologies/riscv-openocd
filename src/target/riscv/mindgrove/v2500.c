@@ -5,13 +5,13 @@
 /* ---- v2500 command leaf table ---- */
 const struct command_registration v2500_command_handlers[] = {
 
-    // {
-    //     .name = "psram_init",
-    //     .handler = v2500_handle_psram_init,
-    //     .mode = COMMAND_EXEC,
-    //     .help = "Initialize PSRAM",
-    //     .usage = "Ram mode",
-    // },
+    {
+        .name = "psram_init",
+        .handler = v2500_handle_psram_init,
+        .mode = COMMAND_EXEC,
+        .help = "Initialize PSRAM",
+        .usage = "Ram mode",
+    },
 
     {
         .name = "flash_erase",
