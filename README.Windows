@@ -54,3 +54,229 @@ For more information, see:
 
   https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/usb-device-specific-registry-settings
   http://www.ftdichip.com/Support/Knowledgebase/index.html?ignorehardwareserialnumber.htm
+
+Building OpenOCD for Windows by cross-compiling from Linux
+----------------------------------------------------------
+
+You can cross-compile Mindgrove OpenOCD for 64-bit Windows (`x86_64-w64-mingw32`) on an Ubuntu/Debian host. This process builds static dependencies (`libusb` and `libftdi`), links them into OpenOCD, and bundles `libftdi1.dll`.
+
+### 1. Install Prerequisites
+
+Install the MinGW-w64 cross-compiler, build tools, and testing utilities:
+
+```bash
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    autoconf automake autotools-dev libtool pkg-config cmake \
+    build-essential bison flex texinfo gperf patchutils bc gawk \
+    git wget curl unzip p7zip-full zip python3 \
+    mingw-w64 binutils-mingw-w64 gcc-mingw-w64 g++-mingw-w64 \
+    libz-mingw-w64-dev nsis wine xvfb
+
+```
+
+### 2. Set Up Environment Variables & Directories
+
+Define your target host, job count, and workspace paths:
+
+```bash
+export WORKSPACE="$(pwd)"
+export RISCV_ROOT="${WORKSPACE}/riscv_windows_build"
+export TARGET_HOST="x86_64-w64-mingw32"
+export JOBS="$(nproc)"
+
+mkdir -p "${RISCV_ROOT}/src" "${RISCV_ROOT}/build" "${RISCV_ROOT}/install" "${RISCV_ROOT}/deps"
+
+```
+
+### 3. Clone Source Repositories
+
+Fetch the Mindgrove OpenOCD repository and its required USB drivers:
+
+```bash
+cd "${RISCV_ROOT}/src"
+
+# Clone OpenOCD (Latest tag)
+git clone --depth 1 --branch <Latest Tag> https://github.com/Mindgrove-Technologies/riscv-openocd.git riscv-openocd
+
+# Clone USB libraries
+git clone --depth 1 https://github.com/mcuee/libftdi.git libftdi
+git clone --depth 1 https://github.com/libusb/libusb.git libusb
+
+```
+
+### 4. Build `libusb` (Static)
+
+Compile a static `libusb` library for Windows:
+
+```bash
+cd "${RISCV_ROOT}/src/libusb"
+
+if [ ! -f configure ]; then
+    autoreconf -fi
+fi
+
+rm -rf "${RISCV_ROOT}/build/libusb-mingw"
+mkdir -p "${RISCV_ROOT}/build/libusb-mingw"
+cd "${RISCV_ROOT}/build/libusb-mingw"
+
+../../src/libusb/configure \
+    --host="${TARGET_HOST}" \
+    --prefix="${RISCV_ROOT}/deps/libusb" \
+    --enable-static --disable-shared
+
+make -j"${JOBS}"
+make install
+
+# Create pkg-config definition
+cat > "${RISCV_ROOT}/deps/libusb/lib/pkgconfig/libusb-1.0.pc" <<EOF
+prefix=${RISCV_ROOT}/deps/libusb
+exec_prefix=\${prefix}
+libdir=\\${exec_prefix}/lib
+includedir=\\${prefix}/include/libusb-1.0
+
+Name: libusb-1.0
+Description: C API for USB device access (MinGW cross)
+Version: 1.0.27
+Libs: -L\\${libdir} -lusb-1.0
+Cflags: -I\\${includedir}
+EOF
+
+```
+
+### 5. Build `libftdi` & Prepare DLL
+
+Compile `libftdi` using CMake with MinGW cross-compilation settings and copy `libftdi1.dll` to the distribution folder:
+
+```bash
+cd "${RISCV_ROOT}"
+
+# Create CMake toolchain file for MinGW
+cat > "${RISCV_ROOT}/src/mingw-toolchain.cmake" <<EOF
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(CMAKE_C_COMPILER   ${TARGET_HOST}-gcc)
+set(CMAKE_CXX_COMPILER ${TARGET_HOST}-g++)
+set(CMAKE_RC_COMPILER  ${TARGET_HOST}-windres)
+set(CMAKE_FIND_ROOT_PATH /usr/${TARGET_HOST})
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++ -static")
+EOF
+
+rm -rf "${RISCV_ROOT}/build/libftdi-mingw"
+mkdir -p "${RISCV_ROOT}/build/libftdi-mingw"
+cd "${RISCV_ROOT}/build/libftdi-mingw"
+
+cmake "${RISCV_ROOT}/src/libftdi" \
+    -DCMAKE_TOOLCHAIN_FILE="${RISCV_ROOT}/src/mingw-toolchain.cmake" \
+    -DCMAKE_INSTALL_PREFIX="${RISCV_ROOT}/deps/libftdi" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DDOCUMENTATION=OFF -DFTDI_EEPROM=OFF -DEXAMPLES=OFF -DFTDIPP=OFF \
+    -DLIBUSB_INCLUDE_DIR="${RISCV_ROOT}/deps/libusb/include/libusb-1.0" \
+    -DLIBUSB_LIBRARIES="${RISCV_ROOT}/deps/libusb/lib/libusb-1.0.a"
+
+make -j"${JOBS}"
+make install
+
+ln -sf "${RISCV_ROOT}/deps/libftdi/lib/libftdi1.a" "${RISCV_ROOT}/deps/libftdi/lib/libftdi.a"
+
+# Pre-copy libftdi1.dll for final distribution
+mkdir -p "${RISCV_ROOT}/install/openocd/bin"
+cp "${RISCV_ROOT}/deps/libftdi/bin/libftdi1.dll" "${RISCV_ROOT}/install/openocd/bin/"
+
+# Create pkg-config definition
+cat > "${RISCV_ROOT}/deps/libftdi/lib/pkgconfig/libftdi1.pc" <<EOF
+prefix=${RISCV_ROOT}/deps/libftdi
+exec_prefix=\${prefix}
+libdir=\\${exec_prefix}/lib
+includedir=\\${prefix}/include/libftdi1
+
+Name: libftdi1
+Description: Library to program and debug FTDI USB chips
+Version: 1.5
+Libs: -L\\${libdir} -lftdi1 -L${RISCV_ROOT}/deps/libusb/lib -lusb-1.0
+Cflags: -I\\${includedir}
+EOF
+
+```
+
+### 6. Build OpenOCD
+
+Configure and compile Mindgrove OpenOCD targeting Windows:
+
+```bash
+export PKG_CONFIG_PATH="${RISCV_ROOT}/deps/libusb/lib/pkgconfig:${RISCV_ROOT}/deps/libftdi/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR=""
+export PKG_CONFIG_SYSROOT_DIR="/"
+
+MOCK_INC="${RISCV_ROOT}/deps/mock_include"
+mkdir -p "$MOCK_INC"
+cp /usr/include/elf.h "$MOCK_INC/elf.h"
+
+cd "${RISCV_ROOT}/src/riscv-openocd"
+git reset --hard
+git clean -fdx
+
+git submodule sync --recursive
+git submodule update --init --recursive --remote --force
+./bootstrap
+
+rm -rf "${RISCV_ROOT}/build/riscv-openocd"
+mkdir -p "${RISCV_ROOT}/build/riscv-openocd"
+cd "${RISCV_ROOT}/build/riscv-openocd"
+
+../../src/riscv-openocd/configure \
+    --host="${TARGET_HOST}" \
+    --prefix="${RISCV_ROOT}/install/openocd" \
+    --enable-internal-jimtcl \
+    --with-jimtcl-opts="--disable-ssl --disable-ipv6 --host=${TARGET_HOST}" \
+    --enable-internal-libjaylink \
+    --enable-ftdi \
+    --enable-jlink \
+    --disable-werror \
+    CPPFLAGS="-D_WIN32_WINNT=0x0600 -I$MOCK_INC -I${RISCV_ROOT}/deps/libusb/include/libusb-1.0 -I${RISCV_ROOT}/deps/libftdi/include/libftdi1" \
+    LDFLAGS="-L${RISCV_ROOT}/deps/libusb/lib -L${RISCV_ROOT}/deps/libftdi/lib -static-libgcc -static-libstdc++" \
+    LIBS="-lsetupapi -lole32 -lwinusb -lws2_32" \
+    CFLAGS="-g -O2"
+
+make -j"${JOBS}"
+make install
+
+# Ensure libftdi1.dll exists alongside openocd.exe in bin/
+mkdir -p "${RISCV_ROOT}/install/openocd/bin"
+cp "${RISCV_ROOT}/deps/libftdi/bin/libftdi1.dll" "${RISCV_ROOT}/install/openocd/bin/"
+
+```
+
+### 7. Verification via Wine (Optional)
+
+You can verify that the Windows binary executes properly under Linux using Wine:
+
+```bash
+INSTALL="${RISCV_ROOT}/install"
+export WINEPREFIX="${RISCV_ROOT}/build/wine_prefix"
+export WINEDEBUG=-all
+rm -rf "$WINEPREFIX"
+mkdir -p "$WINEPREFIX"
+
+# Check DLL Linkage
+${TARGET_HOST}-objdump -p "${INSTALL}/openocd/bin/openocd.exe" | grep "DLL Name"
+
+# Test openocd.exe version output
+xvfb-run -a --server-args="-screen 0 1024x768x24" \
+    wine "${INSTALL}/openocd/bin/openocd.exe" --version
+
+```
+
+### 8. Packaging
+
+To create a standalone `.zip` archive containing `openocd.exe`, drivers, scripts, and bundled DLLs:
+
+```bash
+cd "${RISCV_ROOT}/install/openocd"
+zip -r9 "${RISCV_ROOT}/install/riscv64-openocd-V_2.1-windows.zip" ./*
+
+```
