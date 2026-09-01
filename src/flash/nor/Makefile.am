@@ -82,6 +82,7 @@ NOR_DRIVERS = \
 	%D%/xcf.c \
 	%D%/s2401_flash_driver.c \
 	%D%/secure_iot_flash_driver.c \
+	%D%/v2500_xspi_flash_driver.c \
 	%D%/xmc1xxx.c \
 	%D%/xmc4xxx.c
 
@@ -102,4 +103,6 @@ NORHEADERS = \
 	%D%/stmqspi.h \
 	%D%/s2401_flash_driver.h \
 	%D%/secure_iot_flash_driver.h \
+	%D%/v2500_xspi_flash_driver.h \
+	%D%/v2500_xspi_issi_flash.h \
 	%D%/msp432.h
