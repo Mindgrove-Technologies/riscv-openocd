@@ -10,7 +10,7 @@ const struct command_registration v2500_command_handlers[] = {
         .handler = v2500_handle_psram_init,
         .mode = COMMAND_EXEC,
         .help = "Initialize PSRAM",
-        .usage = "Ram mode",
+        .usage = "<instance>",
     },
 
     {
@@ -34,6 +34,7 @@ const struct command_registration v2500_command_handlers[] = {
         .handler = v2500_handle_flash_xip,
         .mode = COMMAND_EXEC,
         .help = "Enable flash XIP",
+        .usage = "<instance>",
     },
     {
         .name = "reset",
@@ -47,18 +48,21 @@ const struct command_registration v2500_command_handlers[] = {
         .handler = v2500_handle_sector_erase,
         .mode = COMMAND_EXEC,
         .help = "Erase flash sector",
+        .usage = "<instance> <address> <num_sectors>",
     },
 
     {
         .name = "flash_write_length",
         .handler = v2500_handle_flash_write_length,
         .mode = COMMAND_EXEC,
+        .usage = "<instance> <file> <address>",
     },
 
     {
         .name = "flash_write_data",
         .handler = v2500_handle_flash_write_data,
         .mode = COMMAND_EXEC,
+        .usage = "<address> <data>",
     },
 
     COMMAND_REGISTRATION_DONE

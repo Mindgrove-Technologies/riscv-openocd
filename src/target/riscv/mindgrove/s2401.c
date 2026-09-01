@@ -58,7 +58,7 @@ const struct command_registration s2401_command_handlers[] = {
         .name = "flash_write_length",
         .handler = s2401_handle_flash_write_length,
         .mode = COMMAND_EXEC,
-        .usage = "<instance> <address> <file>",
+        .usage = "<instance> <file> <address>",
     },
 
     {
