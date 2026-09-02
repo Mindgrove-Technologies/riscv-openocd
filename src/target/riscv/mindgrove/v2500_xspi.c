@@ -38,7 +38,7 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
     uint32_t ABR   =xspi_base+0x38;
     uint32_t DR    =xspi_base+0x4c;
     uint32_t SR    =xspi_base+0x54;
-    uint32_t LPTR  =xspi_base+0x58;
+    uint32_t LPTR_REG  =xspi_base+0x58;
     uint32_t RMC   =xspi_base+0x5c;
     
     uint32_t temp;
@@ -78,7 +78,7 @@ uint32_t XSPI_Transaction(struct target *target,uint32_t xspinum,xspi_msg *msg){
     temp = (CCR_IMODE(msg->instruction_mode) | CCR_ISIZE(msg->instruction_size) | CCR_ADMODE(msg->address_mode) | CCR_ADSIZE(msg->address_size) | CCR_ABMODE(msg->alternate_byte_mode) | CCR_ABSIZE(msg->alternate_byte_size) | CCR_DMODE(msg->data_mode) | CCR_SIOO(msg->sioo) | CCR_MM_MODE(msg->mm_mode) | CCR_IDTR(msg->IDTR) | CCR_ADDTR(msg->ADDTR) | CCR_ABDTR(msg->ABDTR) | CCR_DDTR(msg->DDTR) | CCR_DQSE(msg->dqse));
     target_write_u32(target,CCR,temp);
     if(msg->TCEN == 1) {
-      target_write_u32(target,LPTR,msg->timeout);
+      target_write_u32(target,LPTR_REG,msg->timeout);
 
     }
     if(msg->instruction_mode) { 
