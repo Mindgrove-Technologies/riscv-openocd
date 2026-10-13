@@ -22,13 +22,20 @@ const struct command_registration s2401_command_handlers[] = {
     },
 
     {
-        .name = "flash_write",
-        .handler = s2401_handle_flash_write,
+        .name = "flash_quad_write",
+        .handler = s2401_handle_flash_quad_write,
         .mode = COMMAND_EXEC,
-        .help = "Flash write",
+        .help = "Flash quad lines write",
         .usage = "<file> <address>",
     },
 
+    {
+        .name = "flash_single_write",
+        .handler = s2401_handle_flash_single_write,
+        .mode = COMMAND_EXEC,
+        .help = "Flash single line write",
+        .usage = "<file> <address>",
+    },
     {
         .name = "flash_xip_init",
         .handler = s2401_handle_flash_xip,
@@ -42,7 +49,7 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_sector_erase,
         .mode = COMMAND_EXEC,
         .help = "Erase flash sector",
-        .usage = "<instance> <address> <num_sectors>",
+        .usage = "<mode> <address> <num_sectors>",
 
     },
 
@@ -58,14 +65,14 @@ const struct command_registration s2401_command_handlers[] = {
         .name = "flash_write_length",
         .handler = s2401_handle_flash_write_length,
         .mode = COMMAND_EXEC,
-        .usage = "<instance> <file> <address>",
+        .usage = "<instance> <file> <address> <no_of_lines>",
     },
 
     {
         .name = "flash_write_data",
         .handler = s2401_handle_flash_write_data,
         .mode = COMMAND_EXEC,
-        .usage = "<address> <data>",
+        .usage = "<address> <no_of_lines> <data>",
     },
 
     COMMAND_REGISTRATION_DONE

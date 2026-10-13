@@ -15,7 +15,12 @@
 #include "helper/binarybuffer.h"
 
 #define CHUNK_SIZE 128
-qspi_msg s2401_flash_msg={.PRESCALER=6,.CLK_MODE=0,.FMEM_SIZE = 27,.FTIE = 0,.TCEN=0,.TEIE=0,.TOIE=0,.SMIE = 0,.APMS= 0,.PMM=0};
+
+#define DEFAULT_FLASH_PRESCALER  10
+#define FLASH_PRESCALER_MIN      6
+#define FLASH_PRESCALER_MAX      0x3FFF
+#define DEFAULT_FLASH_PRESCALER  10
+qspi_msg s2401_flash_msg={.PRESCALER=DEFAULT_FLASH_PRESCALER,.CLK_MODE=0,.FMEM_SIZE = 27,.FTIE = 0,.TCEN=0,.TEIE=0,.TOIE=0,.SMIE = 0,.APMS= 0,.PMM=0};
 
 
 /**
@@ -218,7 +223,15 @@ uint32_t s2401_inputpageQuad(struct target *target,uint8_t qspinum,uint8_t* data
     s2401_flash_msg.mm_mode = CCR_MM_MODE_XIP;
     s2401_flash_msg.alternate_byte_mode = CCR_ABMODE_NIL;
     s2401_flash_msg.length = data_length;
-    return s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
+    s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
+    uint8_t temp;
+    while(1){
+        temp = s2401_readStatusRegister1(target,qspinum);
+        temp = temp & 0x01;
+        if(temp != 0x01)
+        break;
+    }
+    return SUCCESS;
     
 }
 
@@ -240,7 +253,7 @@ uint32_t s2401_inputpageSingle(struct target *target,uint8_t qspinum,uint8_t* da
     s2401_flash_msg.address_size = CCR_ADSIZE_24_BIT;
     s2401_flash_msg.instruction = 0x02;
     s2401_flash_msg.instruction_mode = CCR_IMODE_SINGLE_LINE;
-    s2401_flash_msg.data_mode = CCR_DMODE_FOUR_LINE;
+    s2401_flash_msg.data_mode = CCR_DMODE_SINGLE_LINE;
     s2401_flash_msg.data_buffer = data;
     s2401_flash_msg.functional_mode = CCR_FMODE_INDIRECT_WRITE;
     s2401_flash_msg.dummy_mode = 0;
@@ -249,8 +262,15 @@ uint32_t s2401_inputpageSingle(struct target *target,uint8_t qspinum,uint8_t* da
     s2401_flash_msg.mm_mode = CCR_MM_MODE_XIP;
     s2401_flash_msg.alternate_byte_mode = CCR_ABMODE_NIL;
     s2401_flash_msg.length = data_length;
-    return s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
-    
+     s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
+    uint8_t temp;
+    while(1){
+        temp = s2401_readStatusRegister1(target,qspinum);
+        temp = temp & 0x01;
+        if(temp != 0x01)
+        break;
+    }
+    return SUCCESS;
 }
 /**
  * @fn void sector4KErase(struct target *target,uint8_t qspinum,uint32_t address)
@@ -341,7 +361,15 @@ uint32_t s2401_chipErase(struct target *target,uint8_t qspinum){
     s2401_flash_msg.dummy_bit = 0;
     s2401_flash_msg.mm_mode = CCR_MM_MODE_XIP;
     s2401_flash_msg.alternate_byte_mode = CCR_ABMODE_NIL;
-    return s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
+    s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
+    uint8_t temp;
+        while(1){
+        temp = s2401_readStatusRegister1(target,qspinum);
+        temp = temp & 0x01;
+        if(temp != 0x01)
+        break;
+    }
+    return SUCCESS;
 
 }
 /**
@@ -889,338 +917,265 @@ uint32_t s2401_flash_xip_init(struct target *target,uint8_t qspinum, int flash_s
     return s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
 }
 
-int s2401_handle_flash_write(struct command_invocation *cmd)
+static bool _has_bin_extension(const char *path)
 {
-/*
- * argv[1] = QSPI number
- * argv[2] = filename
- * argv[3] = size if code.bin is fed
- */
-s2401_handle_change_pc(cmd);
-unsigned int qspi_number = 0;
-//  uint32_t address = 0x30;
-//  uint8_t data[16];
-//  COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
-struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
-FILE *file = fopen(CMD_ARGV[0], "rb");
-if (file == NULL) {
-    // perror("Error opening file");
-    command_print(CMD, "File ");
-    return -1;
-}
-uint32_t start_address;
-Elf64_Ehdr elf_header;
-// command_print(CMD, "Argc:%d\n", CMD_ARGC);
-if(CMD_ARGC == 1){
-// Read the ELF header
-
-size_t bytesRead = fread(&elf_header, 1, sizeof(Elf64_Ehdr), file);
-if (bytesRead != sizeof(Elf64_Ehdr)) {
-    fclose(file);
-    return -1;
+    const char *ext = strrchr(path, '.');
+    return ext && strcasecmp(ext, ".bin") == 0;
 }
 
-// Check if the file is a valid ELF file by checking the magic number
-if (elf_header.e_ident[EI_MAG0] != ELFMAG0 || 
-    elf_header.e_ident[EI_MAG1] != ELFMAG1 || 
-    elf_header.e_ident[EI_MAG2] != ELFMAG2 || 
-    elf_header.e_ident[EI_MAG3] != ELFMAG3) {
-    // fprintf(stderr, "This is not a valid ELF file\n");
-    fclose(file);
-    return -1;
-}
-   start_address = elf_header.e_entry;
-}
-else if(CMD_ARGC == 2){
+int s2401_handle_flash_quad_write(struct command_invocation *cmd) {
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: file path missing");
+        command_print(CMD, "Usage: flash_quad_write <file.bin> <address> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    const char *filepath = CMD_ARGV[0];
+
+    if (!_has_bin_extension(filepath)) {
+        command_print(CMD, "Error: '%s' is not a .bin file", filepath);
+        return ERROR_COMMAND_ARGUMENT_INVALID;
+    }
+
+    if (CMD_ARGC < 2) {
+        command_print(CMD, "Error: start address missing");
+        command_print(CMD, "Usage: flash_quad_write <file.bin> <address> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    uint32_t start_address;
    COMMAND_PARSE_NUMBER(uint, CMD_ARGV[1], start_address);
-}
-   // Print the entry point address (start address) in hexadecimal
-command_print(CMD, "Start address: 0x%x\n", start_address);
-if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
-   qspi_number = 0;
-}else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
-   qspi_number = 1;
-}
-else{
-    command_print(CMD, "Not in the expected address range");
-    return ERROR_OK;
-}
-uint32_t mask_address =start_address&~(0xF<<28);
-// command_print(CMD, "mask address: 0x%x\n", mask_address);
-// command_print(CMD, "QSPI number: 0x%x\n", qspi_number);
-// Variable to accumulate the total length of binary data for executable sections
-size_t executable_binary_length = 0;
-Elf64_Phdr phdr;
-if(CMD_ARGC==1){
-// Get the program header table offset and number of entries
-fseek(file, elf_header.e_phoff, SEEK_SET);
 
-
-for (int l = 0; l < elf_header.e_phnum; l++) {
-    // Read the program header
-    uint32_t val = fread(&phdr, sizeof(Elf64_Phdr), 1, file);
-    if (val != 1) {
-        fclose(file);
-        return -1;  // Error reading program header
-    }
-    // Check if the current program header is of type PT_LOAD (executable segment)
-    if (phdr.p_type == PT_LOAD) {
-       executable_binary_length+=phdr.p_filesz;
-    }
-}
-}
-else if(CMD_ARGC==2){
-       // Seek to the end to find the length of the file
-   fseek(file, 0, SEEK_END);
-   executable_binary_length  = ftell(file);
-   rewind(file);  // Rewind to the beginning of the file
-}
-// Print the length of the executable binary data (excluding the ELF header)
-command_print(CMD, "Length of executable binary data (excluding ELF header): %ld bytes\n", executable_binary_length);
-
-/*handling sector erase operation*/
-uint32_t progressed_length = 0;
-log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nWriting code to flash in progress:\n");	
-if(CMD_ARGC==1){
-   
-// Now read and process the program headers for executable content
-FILE *fileheader = fopen(CMD_ARGV[0], "rb");
-fseek(fileheader, elf_header.e_phoff, SEEK_SET);
-for (int l = 0; l < elf_header.e_phnum; l++) {
-   log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "PROGRAM HEADER:%x\n",l);	
-    // Read the program header
-    uint32_t val = fread(&phdr, sizeof(Elf64_Phdr), 1, fileheader);
-    if (val != 1) {
-        fclose(file);
-        return -1;  // Error reading program header
-    }
-    // Check if the current program header is of type PT_LOAD (executable segment)
-    if (phdr.p_type == PT_LOAD) {
-        log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "Segment start virtual address: 0x%lx\n",phdr.p_paddr);
-        fseek(file, phdr.p_offset, SEEK_SET); // Move to the segment's start
-            unsigned char buffer[CHUNK_SIZE];
-            uint8_t bytesReadInChunk;
-            size_t remaining_bytes = phdr.p_filesz;
-            log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nSection length:%lx\n",remaining_bytes);
-            uint8_t to_read;
-            mask_address=phdr.p_paddr&~(0xF<<28);
-            uint32_t erase_start_address = mask_address & ~(0xFFF);
-            uint32_t erase_end_address = (mask_address+remaining_bytes) & ~(0xFFF);
-            for(uint32_t s = erase_start_address;s<=erase_end_address;s+=0x1000){
-               log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "Erasing sector:%x\n",s);	
-               s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-               s2401_sector4KErase(target,qspi_number,s);
-               s2401_writeDisable(target,qspi_number);/*Enable write operation*/
-            }
-            size_t offset = 0x000;
-            
-            while (remaining_bytes > 0) {
-               to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
-               bytesReadInChunk = fread(buffer, 1, to_read, file);
-               log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",mask_address+offset);
-               for(uint8_t i = 0;i<bytesReadInChunk;i++){
-                   log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
-               }
-               s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-               if(((mask_address+offset)&(~(0xFF))) == (((mask_address+offset)+bytesReadInChunk-1)&(~(0xFF)))){//check if start address and end address in same sector
-                s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-                s2401_inputpageQuad(target,qspi_number,buffer,mask_address+offset,bytesReadInChunk);/*To write data to flash*/
-                
-
-                s2401_writeDisable(target,qspi_number);/*Enable write operation*/
-            }
-            else
-            {
-                log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nCrossing sector");
-                uint32_t part1_address,part2_address;
-                uint8_t part1_length,part2_length;
-                part1_address = (mask_address+offset);
-                part2_address = ((mask_address+offset)+bytesReadInChunk-1)&(~(0xFF));
-                part1_length = (part2_address-(mask_address+offset));
-                part2_length = (mask_address+offset)+bytesReadInChunk-part2_address;
-                log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nCrossing sector part1 addr:%x",part1_address);
-                log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nCrossing sector part2 addr:%x",part2_address);
-                
-                s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-                s2401_inputpageQuad(target,qspi_number,buffer,part1_address,part1_length);/*To write data to flash*/
-                s2401_writeDisable(target,qspi_number);/*Enable write operation*/
-                s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-                s2401_inputpageQuad(target,qspi_number,buffer+part1_length,part2_address,part2_length);/*To write data to flash*/
-                s2401_writeDisable(target,qspi_number);/*Enable write operation*/
-            }
-                progressed_length +=bytesReadInChunk;
-                s2401_print_progress_bar(progressed_length, executable_binary_length);
-                offset += bytesReadInChunk;
-                remaining_bytes-=bytesReadInChunk;
-        }
-    }
-}
-fclose(file);
-
-
-}else if(CMD_ARGC==2){
-   unsigned char buffer[CHUNK_SIZE];
-   uint8_t bytesReadInChunk;
-   size_t offset = 0x000;
-   size_t remaining_bytes = executable_binary_length;
-   uint8_t to_read;
-   uint32_t erase_start_address = mask_address & ~(0xFFF);
-   uint32_t erase_end_address = (mask_address+executable_binary_length) & ~(0xFFF);
-   for(uint32_t s = erase_start_address;s<=erase_end_address;s+=0x1000){
-   log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "Erasing sector:%x\n",s);	
-   s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-   s2401_sector4KErase(target,qspi_number,s);
-   s2401_writeDisable(target,qspi_number);/*Enable write operation*/
-   }
-   while (remaining_bytes > 0) {
-      to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
-      bytesReadInChunk = fread(buffer, 1, to_read, file);
-        
-      s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-        
-      s2401_inputpageQuad(target,qspi_number,buffer,mask_address+offset,bytesReadInChunk);/*To write data to flash*/
-        
-    //   writeDisable(target,qspi_number);/*Enable write operation*/
-        
-
-      log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",start_address+offset);
-      for(uint8_t i = 0;i<16;i++){
-          log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
-      }
-      progressed_length +=bytesReadInChunk;
-      s2401_print_progress_bar(progressed_length, executable_binary_length);
-       offset += bytesReadInChunk;
-       remaining_bytes-=bytesReadInChunk;
-}
-// Close the file
-fclose(file);
-}
-log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nCompleted writing!!");	
-command_print(CMD, "Completed writing");
-return ERROR_OK;
-}
-
-
-
-int s2401_handle_flash_write_length(struct command_invocation *cmd)
-{
-/*
- * argv[1] = QSPI number
- * argv[2] = filename
- * argv[3] = size if code.bin is fed
- */
-s2401_handle_change_pc(cmd);
-uint8_t flag=0;
-unsigned int qspi_number = 0;
-//  uint32_t address = 0x30;
-//  uint8_t data[16];
-//  COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
-struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
-const char *ext = strrchr(CMD_ARGV[0], '.');
-    // Check if an extension exists
-    if (ext != NULL) {
-        // Compare the extension with the desired formats
-        if (strcmp(ext, ".bin") == 0) {
-            flag = 2;
-        } else if (strcmp(ext, ".elf") == 0 || strcmp(ext, ".shakti") == 0) {
-            flag = 1;
-        } else {
-            command_print(CMD,"Invalid file format\n");
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 3) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[2], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
         }
     } else {
-        command_print(CMD,"No extension found\n");
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
     }
 
-FILE *file = fopen(CMD_ARGV[0], "rb");
-if (file == NULL) {
-    // perror("Error opening file");
-    command_print(CMD, "File doesnt exist");
-    return -1;
-}
-Elf64_Ehdr elf_header;
-if(flag==1){
-    size_t bytesRead = fread(&elf_header, 1, sizeof(Elf64_Ehdr), file);
-if (bytesRead != sizeof(Elf64_Ehdr)) {
+    s2401_flash_msg.PRESCALER = prescaler;
+    s2401_handle_change_pc(cmd);
+    unsigned int qspi_number = 0;
+    struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
+    FILE *file = fopen(CMD_ARGV[0], "rb");
+
+    command_print(CMD, "Start address: 0x%x\n", start_address);
+    if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
+       qspi_number = 0;
+    }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
+       qspi_number = 1;
+    }
+    else{
+        command_print(CMD, "Not in the expected address range");
+        return ERROR_OK;
+    }
+    uint32_t mask_address =start_address&~(0xF<<28);
+    // command_print(CMD, "mask address: 0x%x\n", mask_address);
+    // command_print(CMD, "QSPI number: 0x%x\n", qspi_number);
+    // Variable to accumulate the total length of binary data for executable sections
+    size_t executable_binary_length = 0;
+    // Seek to the end to find the length of the file
+    fseek(file, 0, SEEK_END);
+    executable_binary_length  = ftell(file);
+    rewind(file);  // Rewind to the beginning of the file
+
+    // Print the length of the executable binary data (excluding the ELF header)
+    command_print(CMD, "Length of executable binary data (excluding ELF header): %ld bytes\n", executable_binary_length);
+
+    /*handling sector erase operation*/
+    uint32_t progressed_length = 0;
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nWriting code to flash in progress:\n");	
+
+    unsigned char buffer[CHUNK_SIZE];
+    uint8_t bytesReadInChunk;
+    size_t offset = 0x000;
+    size_t remaining_bytes = executable_binary_length;
+    uint8_t to_read;
+    uint32_t erase_start_address = mask_address & ~(0xFFF);
+    uint32_t erase_end_address = (mask_address+executable_binary_length) & ~(0xFFF);
+    for(uint32_t s = erase_start_address;s<=erase_end_address;s+=0x1000){
+    log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "Erasing sector:%x\n",s);	
+    s2401_writeEnable(target,qspi_number);/*Enable write operation*/
+    s2401_sector4KErase(target,qspi_number,s);
+    s2401_writeDisable(target,qspi_number);/*Enable write operation*/
+    }
+    while (remaining_bytes > 0) {
+        to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
+        bytesReadInChunk = fread(buffer, 1, to_read, file);
+        s2401_writeEnable(target,qspi_number);/*Enable write operation*/
+
+        s2401_inputpageQuad(target,qspi_number,buffer,mask_address+offset,bytesReadInChunk);/*To write data to flash*/
+        //writeDisable(target,qspi_number);/*Enable write operation*/
+
+        //log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",start_address+offset);
+        //for(uint8_t i = 0;i<to_read;i++){
+        //log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__,  "%x ",buffer[i]);
+        //}
+        progressed_length +=bytesReadInChunk;
+        s2401_print_progress_bar(progressed_length, executable_binary_length);
+        offset += bytesReadInChunk;
+        remaining_bytes-=bytesReadInChunk;
+    }
+    // Close the file
     fclose(file);
-    return -1;
-}
-}
 
-
-uint32_t start_address;
-
-// Read the ELF header
-COMMAND_PARSE_NUMBER(uint, CMD_ARGV[1], start_address);
-// Print the entry point address (start address) in hexadecimal
-command_print(CMD, "(start address): 0x%x\n", start_address);
-if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
-   qspi_number = 0;
-}else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
-   qspi_number = 1;
-}
-else{
-    command_print(CMD, "Not in the expected address range");
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nCompleted writing!!");	
+    command_print(CMD, "Completed writing");
     return ERROR_OK;
 }
-uint32_t mask_address =start_address&~(0xF<<28);
-command_print(CMD, "mask address: 0x%x\n", mask_address);
-command_print(CMD, "QSPI number: 0x%x\n", qspi_number);
-// Variable to accumulate the total length of binary data for executable sections
-size_t executable_binary_length = 0;
-Elf64_Phdr phdr;
-if(flag==1){
-// Get the program header table offset and number of entries
-fseek(file, elf_header.e_phoff, SEEK_SET);
 
 
-for (int l = 0; l < elf_header.e_phnum; l++) {
-    // Read the program header
-    uint32_t val = fread(&phdr, sizeof(Elf64_Phdr), 1, file);
-    if (val != 1) {
-        fclose(file);
-        return -1;  // Error reading program header
+
+int s2401_handle_flash_write_length(struct command_invocation *cmd) {
+
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: file path missing");
+        command_print(CMD, "Usage: flash_write_length <file.bin> <address> <no_of_lines> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
     }
-    // Check if the current program header is of type PT_LOAD (executable segment)
-    if (phdr.p_type == PT_LOAD) {
-       executable_binary_length+=phdr.p_filesz;
+    const char *filepath = CMD_ARGV[0];
+
+    if (!_has_bin_extension(filepath)) {
+        command_print(CMD, "Error: '%s' is not a .bin file", filepath);
+        return ERROR_COMMAND_ARGUMENT_INVALID;
     }
-}
-}
-else if(flag==2){
-       // Seek to the end to find the length of the file
-   fseek(file, 0, SEEK_END);
-   executable_binary_length  = ftell(file);
-   rewind(file);  // Rewind to the beginning of the file
-}
-uint64_t executable_binary_length_copy = (uint64_t)executable_binary_length;
-uint8_t *ptr;     
-ptr =(uint8_t*)&executable_binary_length_copy;
-// writeEnable(target,qspi_number);/*Enable write operation*/
-// sector4KErase(target,qspi_number,mask_address & ~(0xFFF));
-// writeDisable(target,qspi_number);/*Enable write operation*/
-s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-s2401_inputpageQuad(target,qspi_number,ptr,mask_address,8);/*To write data to flash*/
-s2401_writeDisable(target,qspi_number);/*Enable write operation*/
-// Print the length of the executable binary data (excluding the ELF header)
-command_print(CMD, "Length of executable binary data (excluding ELF header): 0x%lx bytes\n", executable_binary_length_copy);
-command_print(CMD, "Completed writing length at mask address :%x",mask_address);
-return ERROR_OK;
+
+    
+    if (CMD_ARGC < 2) {
+        command_print(CMD, "Error: address missing");
+        command_print(CMD, "Usage: flash_write_length <file.bin> <address> <no_of_lines> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    if (CMD_ARGC < 3) {
+        command_print(CMD, "Error: no_of_lines missing");
+        command_print(CMD, "Usage: flash_write_length <file.bin> <address> <no_of_lines> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 4) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[3], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+
+    s2401_handle_change_pc(cmd);
+    unsigned int qspi_number = 0;
+    //  uint32_t address = 0x30;
+    //  uint8_t data[16];
+    //  COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
+    struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
+    FILE *file = fopen(CMD_ARGV[0], "rb");
+    if (file == NULL) {
+        // perror("Error opening file");
+        command_print(CMD, "File doesnt exist");
+        return -1;
+    }
+    uint8_t no_of_lines;
+    uint32_t start_address;
+    
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[2], no_of_lines);
+    COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], start_address);
+    // Print the entry point address (start address) in hexadecimal
+    command_print(CMD, "(start address): 0x%x\n", start_address);
+    if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
+       qspi_number = 0;
+    }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
+       qspi_number = 1;
+    }
+    else{
+        command_print(CMD, "Not in the expected address range");
+        return ERROR_OK;
+    }
+    uint32_t mask_address =start_address&~(0xF<<28);
+    command_print(CMD, "mask address: 0x%x\n", mask_address);
+    command_print(CMD, "QSPI number: 0x%x\n", qspi_number);
+    // Variable to accumulate the total length of binary data for executable sections
+    size_t executable_binary_length = 0;
+    // Seek to the end to find the length of the file
+    fseek(file, 0, SEEK_END);
+    executable_binary_length  = ftell(file);
+    rewind(file);  // Rewind to the beginning of the file
+    
+    uint64_t executable_binary_length_copy = (uint64_t)executable_binary_length;
+    uint8_t *ptr;     
+    ptr =(uint8_t*)&executable_binary_length_copy;
+    // writeEnable(target,qspi_number);/*Enable write operation*/
+    // sector4KErase(target,qspi_number,mask_address & ~(0xFFF));
+    // writeDisable(target,qspi_number);/*Enable write operation*/
+    s2401_writeEnable(target,qspi_number);/*Enable write operation*/
+    if(no_of_lines == 4){
+        s2401_inputpageQuad(target,qspi_number,ptr,mask_address,8);/*To write data to flash in four lines*/
+    } else if( no_of_lines == 1) {
+        s2401_inputpageSingle(target,qspi_number,ptr,mask_address,8);/*To write data to flash in single line*/
+    } else {
+        command_print(CMD, "Error: Invalid no of lines");
+        return ERROR_OK;
+    }
+    s2401_writeDisable(target,qspi_number);/*Enable write operation*/
+    // Print the length of the executable binary data (excluding the ELF header)
+    command_print(CMD, "Length of executable binary data (excluding ELF header): 0x%lx bytes\n", executable_binary_length_copy);
+    command_print(CMD, "Completed writing length at mask address :%x",mask_address);
+    return ERROR_OK;
 }
 
 
-int s2401_handle_flash_write_data(struct command_invocation *cmd)
-{
+int s2401_handle_flash_write_data(struct command_invocation *cmd) {
 /*
  * argv[1] = address
  * argv[2 ... n-1] = data
  */
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: address missing");
+        command_print(CMD, "Usage: flash_write_data <address> <no_of_lines> <data1>....<datan>");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    if (CMD_ARGC < 2) {
+        command_print(CMD, "Error: no_of_lines missing");
+        command_print(CMD, "Usage: flash_write_data <address> <no_of_lines> <data1>....<datan>");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    if (CMD_ARGC < 3) {
+        command_print(CMD, "Error: data missing");
+        command_print(CMD, "Usage: flash_write_data <address> <no_of_lines> <data1>....<datan>");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 4) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[3], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+
     s2401_handle_change_pc(cmd);
     uint32_t start_address,length=0;
-    uint32_t total_length = (CMD_ARGC)-1;
+    uint32_t total_length = (CMD_ARGC)-2;
     uint8_t qspi_number=0;
-    uint8_t __attribute__((unused)) data[CMD_ARGC-1];
+    uint8_t __attribute__((unused)) data[CMD_ARGC-2];
     struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
-    COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], start_address);
+    COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], start_address);
     if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
         qspi_number = 0;
     }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
@@ -1229,12 +1184,14 @@ int s2401_handle_flash_write_data(struct command_invocation *cmd)
     else{
     command_print(CMD, "Not in the expected address range");
     return ERROR_OK;
-}
+    }
+    uint8_t no_of_lines;
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[1], no_of_lines);
     // printf("Start address :%x",start_address);
     // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "\nqspi_number :%x ,total_length :%x",qspi_number,total_length);
     // Read the ELF header
     for(uint32_t i = 0;i<total_length;i++){
-        COMMAND_PARSE_NUMBER(u8, CMD_ARGV[i+1], data[i]);
+        COMMAND_PARSE_NUMBER(u8, CMD_ARGV[i+2], data[i]);
     }
     // for(uint8_t j = 0;j<total_length;j++){
     //       log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "%x ",data[j]);
@@ -1243,7 +1200,14 @@ int s2401_handle_flash_write_data(struct command_invocation *cmd)
     for(uint32_t address __attribute__((unused)) = start_address&~(0xF<<28),l=0,remaining_length=total_length;remaining_length;address+=length){
         length = (remaining_length>16)?16:remaining_length;
             s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-            s2401_inputpageQuad(target,qspi_number,ptr+l,address,length);/*To write data to flash*/
+            if(no_of_lines == 4){
+                s2401_inputpageQuad(target,qspi_number,ptr+l,address,length);/*To write data to flash in four lines*/
+            } else if( no_of_lines == 1) {
+                s2401_inputpageSingle(target,qspi_number,ptr+l,address,length);/*To write data to flash in single line*/
+            } else {
+                command_print(CMD, "Error: Invalid no of lines");
+                return ERROR_OK;
+            }
             s2401_writeDisable(target,qspi_number);/*Enable write operation*/
         //     printf("Every iteration data: %x\n",address);
         //     log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "Address : %x\n",address);
@@ -1253,50 +1217,83 @@ int s2401_handle_flash_write_data(struct command_invocation *cmd)
         remaining_length-=length;
         l+=length;
     }
-return ERROR_OK;
+    return ERROR_OK;
 }
 
 int s2401_handle_sector_erase(struct command_invocation *cmd)
 {
-/*
- * argv[1] = QSPI number
- * 
- */
-s2401_handle_change_pc(cmd);
-unsigned int start_address,no_of_sectors,mode,qspi_number=0;
-COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], mode);
-COMMAND_PARSE_NUMBER(uint, CMD_ARGV[1], start_address);
-COMMAND_PARSE_NUMBER(uint, CMD_ARGV[2], no_of_sectors);
-struct target *target = get_current_target(CMD_CTX);
-command_print(CMD, "Requested sectors are erased");
-log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Sector Erase in Progress!!");
-if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
-   qspi_number = 0;
-}else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
-   qspi_number = 1;
-}
-else{
-    command_print(CMD, "Not in the expected address range");
-    return ERROR_OK;
-}
-uint32_t mask_value =(mode==4)?(~(0xFFF)):((mode==32)?~(0x7FFF):0);
-uint32_t increment=(mode==4)?(0x1000):((mode==32)?(0x8000):0);
-uint32_t mask_address =start_address&~(0xF<<28);
-uint32_t erase_start_address = mask_address & mask_value;
-for(uint32_t s = erase_start_address,i=0;i<no_of_sectors;s+=increment,i++){
-   log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Erasing sector:%x\n",s);
-   s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-   if(mode==4)
-   s2401_sector4KErase(target,qspi_number,s);
-   else if (mode==32)
-   s2401_sector32KErase(target,qspi_number,s);
-   s2401_writeDisable(target,qspi_number);/*Enable write operation*/
-}
-return 0;
+
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: mode missing");
+        command_print(CMD, "Usage: flash_sector_erase <mode> <address> <no_of_sectors> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    if (CMD_ARGC < 2) {
+        command_print(CMD, "Error: address missing");
+        command_print(CMD, "Usage: flash_sector_erase <mode> <address> <no_of_sectors> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    if (CMD_ARGC < 3) {
+        command_print(CMD, "Error: no_of_sectors missing");
+        command_print(CMD, "Usage: flash_sector_erase <mode> <address> <no_of_sectors> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 4) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[3], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+    s2401_handle_change_pc(cmd);
+    uint32_t start_address,no_of_sectors,mode,qspi_number=0;
+    COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], mode);
+    COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], start_address);
+    COMMAND_PARSE_NUMBER(u32, CMD_ARGV[2], no_of_sectors);
+    struct target *target = get_current_target(CMD_CTX);
+    command_print(CMD, "Requested sectors are erased");
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Sector Erase in Progress!!");
+    if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
+       qspi_number = 0;
+    }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
+       qspi_number = 1;
+    }
+    else{
+        command_print(CMD, "Not in the expected address range");
+        return ERROR_OK;
+    }
+    uint32_t mask_value =(mode==4)?(~(0xFFF)):((mode==32)?~(0x7FFF):0);
+    uint32_t increment=(mode==4)?(0x1000):((mode==32)?(0x8000):0);
+    uint32_t mask_address =start_address&~(0xF<<28);
+    uint32_t erase_start_address = mask_address & mask_value;
+    for(uint32_t s = erase_start_address,i=0;i<no_of_sectors;s+=increment,i++){
+        log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Erasing sector:%x\n",s);
+        s2401_writeEnable(target,qspi_number);/*Enable write operation*/
+        if(mode==4)
+            s2401_sector4KErase(target,qspi_number,s);
+        else if (mode==32)
+            s2401_sector32KErase(target,qspi_number,s);
+        else {
+            command_print(CMD, "Error: Invalid mode");
+            return ERROR_OK;
+        }
+        s2401_writeDisable(target,qspi_number);/*Enable write operation*/
+    }
+    return 0;
 }
 
-int s2401_handle_reset(struct command_invocation *cmd)
-{
+int s2401_handle_reset(struct command_invocation *cmd) {
+    
     struct target *target = get_current_target(CMD_CTX);
     uint32_t wd_cntrl_reg = 0x40508;
     uint16_t wd_cntrl = 5; // Enable the wdtimer and sets soft reset bit in control reg
@@ -1307,49 +1304,191 @@ int s2401_handle_reset(struct command_invocation *cmd)
 
 int s2401_handle_flash_erase(struct command_invocation *cmd)
 {
-/*
- * argv[1] = QSPI number
- * 
- */
-s2401_handle_change_pc(cmd);
-unsigned int qspi_number;
-uint8_t sr;
-COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
-struct target *target = get_current_target(CMD_CTX);
-command_print(CMD, "Flash erase is invoked with qspi %x",qspi_number);
-command_print(CMD, "Wait Chip Erase in Progress!!");
-log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Wait Chip Erase in Progress!!");
-s2401_writeEnable(target,qspi_number);/*Enable write operation*/
-s2401_chipErase(target,qspi_number);/*Send chip erase command*/
-s2401_writeDisable(target,qspi_number);/*Disable write operation*/
-uint8_t temp = 0;
-while(1)
-{
-temp =  s2401_readFlagStatusRegister(target,qspi_number);
-sr = s2401_readStatusRegister1(target,qspi_number);
-temp = temp & (1<<7);
-if(temp == (1<<7)&&(sr == 0)){/*Wait till ready bit is set,used to check if erase operation is in progress*/
-    break; 
-}
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: instance missing");
+        command_print(CMD, "Usage: flash_erase <instance> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 2) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+
+    s2401_handle_change_pc(cmd);
+    uint8_t qspi_number;
+// uint8_t sr;
+    if (qspi_number > 2) {
+        command_print(CMD, "Error: Invalid instance");
+        return ERROR_OK;
+    }
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[0], qspi_number);
+    struct target *target = get_current_target(CMD_CTX);
+    command_print(CMD, "Flash erase is invoked with qspi %x",qspi_number);
+    command_print(CMD, "Wait Chip Erase in Progress!!");
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "Wait Chip Erase in Progress!!");
+    s2401_writeEnable(target,qspi_number);/*Enable write operation*/
+    s2401_chipErase(target,qspi_number);/*Send chip erase command*/
+    s2401_writeDisable(target,qspi_number);/*Disable write operation*/
+    command_print(CMD, "Chip Erase Complete!"); 
+    return ERROR_OK;
 }
 
-command_print(CMD, "Chip Erase Complete!"); 
-return ERROR_OK;
+int s2401_handle_flash_xip(struct command_invocation *cmd) {
+
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: instance missing");
+        command_print(CMD, "Usage: flash_xip_init <instance> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 2) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+    s2401_handle_change_pc(cmd);
+    uint8_t qspi_number;
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[0], qspi_number);
+    if (qspi_number > 2) {
+        command_print(CMD, "Error: Invalid instance");
+        return ERROR_OK;
+    }
+
+    struct target *target = get_current_target(CMD_CTX);
+    command_print(CMD, "Flash xip is configured with qspi %x",qspi_number);
+    s2401_flash_xip_init(target,qspi_number,27);
+    return ERROR_OK;
 }
 
-int s2401_handle_flash_xip(struct command_invocation *cmd)
-{
-/*
- * argv[1] = QSPI number
- * 
- */
-s2401_handle_change_pc(cmd);
-unsigned int qspi_number;
-COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
-struct target *target = get_current_target(CMD_CTX);
-command_print(CMD, "Flash xip is configured with qspi %x",qspi_number);
-s2401_flash_xip_init(target,qspi_number,27);
-return ERROR_OK;
+int s2401_handle_flash_single_write(struct command_invocation *cmd) {
+
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: file path missing");
+        command_print(CMD, "Usage: flash_single_write <file.bin> <address> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    const char *filepath = CMD_ARGV[0];
+
+    if (!_has_bin_extension(filepath)) {
+        command_print(CMD, "Error: '%s' is not a .bin file", filepath);
+        return ERROR_COMMAND_ARGUMENT_INVALID;
+    }
+
+    if (CMD_ARGC < 2) {
+        command_print(CMD, "Error: start address missing");
+        command_print(CMD, "Usage: flash_single_write <file.bin> <address> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    uint32_t start_address;
+    COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], start_address);
+
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 3) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[2], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+    s2401_handle_change_pc(cmd);
+    unsigned int qspi_number = 0;
+    struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
+    FILE *file = fopen(CMD_ARGV[0], "rb");
+
+    command_print(CMD, "Start address: 0x%x\n", start_address);
+    if((start_address>=0x90000000) &&(start_address<=0xAFFFFFFF)){
+       qspi_number = 0;
+    }else if((start_address>=0xB0000000) &&(start_address<=0xCFFFFFFF)){
+       qspi_number = 1;
+    }
+    else{
+        command_print(CMD, "Not in the expected address range");
+        return ERROR_OK;
+    }
+    uint32_t mask_address =start_address&~(0xF<<28);
+    command_print(CMD, "mask address: 0x%x\n", mask_address);
+    command_print(CMD, "QSPI number: 0x%x\n", qspi_number);
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "mask address: 0x%x\n", mask_address);	
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "QSPI number: 0x%x\n", qspi_number);	
+
+
+    // Variable to accumulate the total length of binary data for executable sections
+    size_t executable_binary_length = 0;
+    // Seek to the end to find the length of the file
+    fseek(file, 0, SEEK_END);
+    executable_binary_length  = ftell(file);
+    rewind(file);  // Rewind to the beginning of the file
+
+    // Print the length of the executable binary data (excluding the ELF header)
+    command_print(CMD, "Length of executable binary data (excluding ELF header): %ld bytes\n", executable_binary_length);
+
+    /*handling sector erase operation*/
+    uint32_t progressed_length = 0;
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nWriting code to flash in progress:\n");	
+
+    unsigned char buffer[CHUNK_SIZE];
+    uint8_t bytesReadInChunk;
+    size_t offset = 0x000;
+    size_t remaining_bytes = executable_binary_length;
+    uint8_t to_read;
+    uint32_t erase_start_address = mask_address & ~(0xFFF);
+    uint32_t erase_end_address = (mask_address+executable_binary_length) & ~(0xFFF);
+    for(uint32_t s = erase_start_address;s<=erase_end_address;s+=0x1000){
+    log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "Erasing sector:%x\n",s);	
+    s2401_writeEnable(target,qspi_number);/*Enable write operation*/
+    s2401_sector4KErase(target,qspi_number,s);
+    s2401_writeDisable(target,qspi_number);/*Enable write operation*/
+    }
+    while (remaining_bytes > 0) {
+        to_read = (remaining_bytes>CHUNK_SIZE)?CHUNK_SIZE:remaining_bytes;
+        bytesReadInChunk = fread(buffer, 1, to_read, file);
+        log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "mask_address+offset: 0x%lx\n", mask_address+offset);
+
+        // for(uint8_t i = 0;i<bytesReadInChunk;i++){
+        //     log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "\n%x ",buffer[i]);
+        // }
+        s2401_writeEnable(target,qspi_number);/*Enable write operation*/
+        s2401_inputpageSingle(target,qspi_number,buffer,mask_address+offset,bytesReadInChunk);/*To write data to flash*/
+        //writeDisable(target,qspi_number);/*Enable write operation*/
+        // log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__,  "\nto_read = %d ",to_read);
+        //log_printf(LOG_LVL_DEBUG, __FILE__, __LINE__, __func__, "\nWriting at offset:%lx\n",start_address+offset);
+
+        progressed_length +=bytesReadInChunk;
+        s2401_print_progress_bar(progressed_length, executable_binary_length);
+        offset += bytesReadInChunk;
+        remaining_bytes-=bytesReadInChunk;
+    }
+    // Close the file
+    fclose(file);
+
+    log_printf(LOG_LVL_OUTPUT, __FILE__, __LINE__, __func__, "\nCompleted writing!!");	
+    command_print(CMD, "Completed writing");
+    return ERROR_OK;
 }
  
 

@@ -6,7 +6,9 @@
 /* Use two underscores to declare the signature for external use */
 __COMMAND_HANDLER(s2401_handle_psram_init);
 __COMMAND_HANDLER(s2401_handle_flash_erase);
-__COMMAND_HANDLER(s2401_handle_flash_write);
+__COMMAND_HANDLER(s2401_handle_flash_quad_write);
+__COMMAND_HANDLER(s2401_handle_flash_single_write);
+
 __COMMAND_HANDLER(s2401_handle_flash_xip);
 __COMMAND_HANDLER(s2401_handle_sector_erase);
 __COMMAND_HANDLER(s2401_handle_reset);
