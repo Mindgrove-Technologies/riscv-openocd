@@ -917,6 +917,23 @@ uint32_t s2401_flash_xip_init(struct target *target,uint8_t qspinum, int flash_s
     return s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
 }
 
+uint32_t s2401_flash_single_xip_init(struct target *target,uint8_t qspinum, int flash_size){
+    s2401_flash_msg.address_mode = CCR_ADMODE_SINGLE_LINE;
+    s2401_flash_msg.address_size = CCR_ADSIZE_24_BIT;
+    s2401_flash_msg.FMEM_SIZE = flash_size;
+    s2401_flash_msg.instruction = 0x03;
+    s2401_flash_msg.instruction_mode = CCR_IMODE_SINGLE_LINE;
+    s2401_flash_msg.data_mode = CCR_DMODE_SINGLE_LINE;
+    s2401_flash_msg.functional_mode = CCR_FMODE_MMM;
+    s2401_flash_msg.dummy_mode = 0;
+    s2401_flash_msg.dummy_cycles = 0;
+    s2401_flash_msg.dummy_bit = 1;
+    s2401_flash_msg.mm_mode = CCR_MM_MODE_XIP;
+    s2401_flash_msg.alternate_byte_mode = CCR_ABMODE_NIL;
+    s2401_flash_msg.length = 0;
+    return s2401_QSPI_Transaction(target,qspinum,&s2401_flash_msg);
+}
+
 static bool _has_bin_extension(const char *path)
 {
     const char *ext = strrchr(path, '.');
@@ -1343,7 +1360,44 @@ int s2401_handle_flash_erase(struct command_invocation *cmd)
     return ERROR_OK;
 }
 
-int s2401_handle_flash_xip(struct command_invocation *cmd) {
+
+
+int s2401_handle_flash_single_xip(struct command_invocation *cmd) {
+
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: instance missing");
+        command_print(CMD, "Usage: flash_xip_init <instance> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 2) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+    s2401_handle_change_pc(cmd);
+    uint8_t qspi_number;
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[0], qspi_number);
+    if (qspi_number > 2) {
+        command_print(CMD, "Error: Invalid instance");
+        return ERROR_OK;
+    }
+
+    struct target *target = get_current_target(CMD_CTX);
+    command_print(CMD, "Flash xip is configured with qspi %x",qspi_number);
+    s2401_flash_single_xip_init(target,qspi_number,27);
+    return ERROR_OK;
+}
+
+int s2401_handle_flash_quad_xip(struct command_invocation *cmd) {
 
     if (CMD_ARGC < 1) {
         command_print(CMD, "Error: instance missing");
@@ -1491,6 +1545,145 @@ int s2401_handle_flash_single_write(struct command_invocation *cmd) {
     return ERROR_OK;
 }
  
+int s2401_handle_flash_read_status_register(struct command_invocation *cmd) {
+
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: instance missing");
+        command_print(CMD, "Usage: flash_read_status_register <instance> <register_no> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    
+    if (CMD_ARGC < 2) {
+        command_print(CMD, "Error: register_no missing");
+        command_print(CMD, "Usage: flash_read_status_register <instance> <register_no> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 3) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[3], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+
+    s2401_handle_change_pc(cmd);
+    uint8_t qspi_number = 0;
+    //  uint32_t address = 0x30;
+    //  uint8_t data[16];
+    //  COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
+    struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
+
+    uint8_t register_no;
+
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[0], qspi_number);
+    if (qspi_number > 2) {
+        command_print(CMD, "Error: Invalid instance");
+        return ERROR_OK;
+    }
+    
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[1], register_no);
+    uint8_t status_data;
+
+
+    if(register_no == 1) {
+        status_data =  s2401_readStatusRegister1(target, qspi_number);
+    } else if(register_no == 2) {
+        status_data =  s2401_readStatusRegister2(target, qspi_number);
+    } else if(register_no == 3) {
+        status_data =  s2401_readStatusRegister3(target, qspi_number);
+    } else {
+        command_print(CMD, "Error: Invalid register no");
+        return ERROR_OK;
+    }
+
+    command_print(CMD, "Status register%d = %d\n", register_no, status_data);
+
+    return ERROR_OK;
+}
+
+
+
+int s2401_handle_flash_write_status_register(struct command_invocation *cmd) {
+
+    if (CMD_ARGC < 1) {
+        command_print(CMD, "Error: instance missing");
+        command_print(CMD, "Usage: flash_read_status_register <instance> <register_no> <status_data> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+    
+    if (CMD_ARGC < 2) {
+        command_print(CMD, "Error: register_no missing");
+        command_print(CMD, "Usage: flash_read_status_register <instance> <register_no> <status_data> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    if (CMD_ARGC < 3) {
+        command_print(CMD, "Error: status_data missing");
+        command_print(CMD, "Usage: flash_read_status_register <instance> <register_no> <status_data> [prescaler]");
+        return ERROR_COMMAND_SYNTAX_ERROR;
+    }
+
+    uint32_t prescaler = DEFAULT_FLASH_PRESCALER;
+    if (CMD_ARGC == 4) {
+        COMMAND_PARSE_NUMBER(u32, CMD_ARGV[3], prescaler);
+        if (prescaler < FLASH_PRESCALER_MIN || prescaler > FLASH_PRESCALER_MAX) {
+            command_print(CMD, "Error: invalid prescaler 0x%" PRIx32
+                          " (valid: 0x%x - 0x%x)",
+                          prescaler, FLASH_PRESCALER_MIN, FLASH_PRESCALER_MAX);
+            return ERROR_COMMAND_ARGUMENT_INVALID;
+        }
+    } else {
+        command_print(CMD, "Prescaler not given, using default: %u", DEFAULT_FLASH_PRESCALER);
+    }
+
+    s2401_flash_msg.PRESCALER = prescaler;
+
+    s2401_handle_change_pc(cmd);
+    uint8_t qspi_number = 0;
+    //  uint32_t address = 0x30;
+    //  uint8_t data[16];
+    //  COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], qspi_number);
+    struct target *target __attribute__((unused)) = get_current_target(CMD_CTX);
+
+    uint8_t register_no;
+
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[0], qspi_number);
+    if (qspi_number > 2) {
+        command_print(CMD, "Error: Invalid instance");
+        return ERROR_OK;
+    }
+    
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[1], register_no);
+    uint8_t status_data;
+    COMMAND_PARSE_NUMBER(u8, CMD_ARGV[2], status_data);
+
+    s2401_writeEnable(target,qspi_number);/*Enable write operation*/
+
+    if(register_no == 1) {
+        s2401_writeStatusRegister1(target, qspi_number, &status_data);
+    } else if(register_no == 2) {
+        s2401_writeStatusRegister2(target, qspi_number, &status_data);
+    } else if(register_no == 3) {
+        s2401_writeStatusRegister3(target, qspi_number, &status_data);
+    } else {
+        s2401_writeDisable(target,qspi_number);
+        command_print(CMD, "Error: Invalid no of lines");
+        return ERROR_OK;
+    }
+
+    command_print(CMD, "Write to the status register is completed\n");
+
+    return ERROR_OK;
+}
+
 
 FLASH_BANK_COMMAND_HANDLER (s2401_flash_bank_command)
 {

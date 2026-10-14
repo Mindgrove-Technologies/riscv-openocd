@@ -18,7 +18,7 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_flash_erase,
         .mode = COMMAND_EXEC,
         .help = "Flash erase",
-        .usage = "<instance>",
+        .usage = "<instance> [prescaler]",
     },
 
     {
@@ -26,7 +26,7 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_flash_quad_write,
         .mode = COMMAND_EXEC,
         .help = "Flash quad lines write",
-        .usage = "<file> <address>",
+        .usage = "<file> <address> [prescaler]",
     },
 
     {
@@ -34,14 +34,22 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_flash_single_write,
         .mode = COMMAND_EXEC,
         .help = "Flash single line write",
-        .usage = "<file> <address>",
+        .usage = "<file> <address> [prescaler]",
     },
     {
-        .name = "flash_xip_init",
-        .handler = s2401_handle_flash_xip,
+        .name = "flash_quad_xip_init",
+        .handler = s2401_handle_flash_quad_xip,
         .mode = COMMAND_EXEC,
-        .help = "Enable flash XIP",
-        .usage = "<instance>",
+        .help = "Enable flash XIP in four lines",
+        .usage = "<instance> [prescaler]",
+    },
+    
+    {
+        .name = "flash_single_xip_init",
+        .handler = s2401_handle_flash_single_xip,
+        .mode = COMMAND_EXEC,
+        .help = "Enable flash XIP in single line",
+        .usage = "<instance> [prescaler]",
     },
 
     {
@@ -49,7 +57,7 @@ const struct command_registration s2401_command_handlers[] = {
         .handler = s2401_handle_sector_erase,
         .mode = COMMAND_EXEC,
         .help = "Erase flash sector",
-        .usage = "<mode> <address> <num_sectors>",
+        .usage = "<mode> <address> <num_sectors> [prescaler]",
 
     },
 
@@ -65,14 +73,31 @@ const struct command_registration s2401_command_handlers[] = {
         .name = "flash_write_length",
         .handler = s2401_handle_flash_write_length,
         .mode = COMMAND_EXEC,
-        .usage = "<instance> <file> <address> <no_of_lines>",
+        .usage = "<instance> <file> <address> <no_of_lines> [prescaler]",
     },
 
     {
         .name = "flash_write_data",
         .handler = s2401_handle_flash_write_data,
         .mode = COMMAND_EXEC,
-        .usage = "<address> <no_of_lines> <data>",
+        .help = "Write the data in the mentioned address location  ",
+        .usage = "<address> <no_of_lines> <data> [prescaler]",
+    },
+
+    {
+        .name = "flash_read_status",
+        .handler = s2401_handle_flash_read_status_register,
+        .mode = COMMAND_EXEC,
+        .help = "Read the status register",
+        .usage = "<instance> <register_no> [prescaler]",
+    },
+
+    {
+        .name = "flash_write_status",
+        .handler = s2401_handle_flash_write_status_register,
+        .mode = COMMAND_EXEC,
+        .help = "Write the status register",
+        .usage = "<instance> <register_no> <status_data> [prescaler]",
     },
 
     COMMAND_REGISTRATION_DONE
