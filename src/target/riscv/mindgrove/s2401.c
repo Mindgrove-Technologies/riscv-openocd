@@ -6,13 +6,21 @@
 const struct command_registration s2401_command_handlers[] = {
 
     {
-        .name = "psram_init",
-        .handler = s2401_handle_psram_init,
+        .name = "psram_quad_init",
+        .handler = s2401_handle_psram_quad_init,
         .mode = COMMAND_EXEC,
-        .help = "Initialize PSRAM",
-        .usage = "<instance>",
+        .help = "Initialize PSRAM in quad lines",
+        .usage = "<instance> [prescaler]",
     },
 
+    {
+        .name = "psram_single_init",
+        .handler = s2401_handle_psram_single_init,
+        .mode = COMMAND_EXEC,
+        .help = "Initialize PSRAM in single line",
+        .usage = "<instance> [prescaler]",
+    },
+    
     {
         .name = "flash_erase",
         .handler = s2401_handle_flash_erase,

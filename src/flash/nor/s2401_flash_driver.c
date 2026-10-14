@@ -910,7 +910,7 @@ uint32_t s2401_flash_xip_init(struct target *target,uint8_t qspinum, int flash_s
     s2401_flash_msg.functional_mode = CCR_FMODE_MMM;
     s2401_flash_msg.dummy_mode = 0;
     s2401_flash_msg.dummy_cycles = 8;
-    s2401_flash_msg.dummy_bit = 1;
+    s2401_flash_msg.dummy_bit = 0;
     s2401_flash_msg.mm_mode = CCR_MM_MODE_XIP;
     s2401_flash_msg.alternate_byte_mode = CCR_ABMODE_NIL;
     s2401_flash_msg.length = 0;
@@ -927,7 +927,7 @@ uint32_t s2401_flash_single_xip_init(struct target *target,uint8_t qspinum, int 
     s2401_flash_msg.functional_mode = CCR_FMODE_MMM;
     s2401_flash_msg.dummy_mode = 0;
     s2401_flash_msg.dummy_cycles = 0;
-    s2401_flash_msg.dummy_bit = 1;
+    s2401_flash_msg.dummy_bit = 0;
     s2401_flash_msg.mm_mode = CCR_MM_MODE_XIP;
     s2401_flash_msg.alternate_byte_mode = CCR_ABMODE_NIL;
     s2401_flash_msg.length = 0;
